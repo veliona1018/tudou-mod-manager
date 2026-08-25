@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>L4D2 Mod 管理器</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">L4</div>
+          <div>
+            <strong>Mod 管理器</strong>
+            <span>LOCAL LIBRARY</span>
+          </div>
+        </div>
+
+        <nav class="nav" aria-label="主导航">
+          <button class="nav-item active" data-category="all" type="button"><i data-lucide="layout-grid"></i>Mod 库</button>
+          <button class="nav-item" data-category="map" type="button"><i data-lucide="map"></i>地图</button>
+          <button class="nav-item" data-category="model" type="button"><i data-lucide="scan-face"></i>模型</button>
+          <button class="nav-item" data-category="survivor_target" type="button"><i data-lucide="arrow-left-right"></i>角色调整</button>
+          <button class="nav-item" data-category="voice_replacement" type="button"><i data-lucide="audio-lines"></i>语音替换</button>
+          <button class="nav-item" data-category="spray" type="button"><i data-lucide="image"></i>喷漆</button>
+          <button id="ai-settings-nav" class="nav-item" type="button"><i data-lucide="brain-circuit"></i>AI 设置</button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="folder-label"><i data-lucide="folder-open"></i>当前目录</div>
+          <div id="root-path" class="root-path">正在读取...</div>
+          <button id="change-folder-button" class="outline-button" type="button"><i data-lucide="folder-cog"></i>更改目录</button>
+          <button id="reset-folder-button" class="outline-button" type="button"><i data-lucide="folder-heart"></i>恢复默认目录</button>
+          <button id="refresh-button" class="outline-button" type="button"><i data-lucide="refresh-cw"></i>刷新目录</button>
+        </div>
+      </aside>
+
+      <section class="content">
+        <header class="topbar">
+          <div>
+            <div id="page-eyebrow" class="eyebrow">SURVIVAL LIBRARY / 01</div>
+            <h1 id="page-title">我的 Mod</h1>
+          </div>
+          <div class="top-actions">
+            <div class="search-box">
+              <i data-lucide="search"></i>
+              <input id="search-input" type="search" placeholder="搜索 Mod 名称或文件" aria-label="搜索 Mod" />
+              <kbd>/</kbd>
+            </div>
+            <button id="refresh-button-top" class="icon-button" type="button" title="刷新目录" aria-label="刷新目录"><i data-lucide="refresh-cw"></i></button>
+            <button id="import-button" class="primary-button" type="button"><i data-lucide="archive-restore"></i>导入压缩包</button>
+            <input id="import-input" type="file" hidden accept=".zip,.tar,.gz,.tgz,.bz2,.xz,.7z,.rar" />
+            <button id="settings-button" class="icon-button" type="button" title="AI 设置" aria-label="AI 设置"><i data-lucide="settings-2"></i></button>
+          </div>
+        </header>
+
+        <section class="stats" aria-label="库统计">
+          <div class="stat"><span id="total-label">全部 Mod</span><strong id="total-count">--</strong></div>
+          <div class="stat"><span>已配对预览</span><strong id="matched-count">--</strong></div>
+          <div class="stat warning"><span>需要整理</span><strong id="issue-count">--</strong></div>
+        </section>
+
+        <div class="toolbar">
+          <div class="toolbar-filters">
+            <div class="filters" role="tablist" aria-label="筛选 Mod">
+              <button class="filter active" data-filter="all" type="button">全部</button>
+              <button class="filter" data-filter="matched" type="button">已配对</button>
+              <button class="filter" data-filter="missing_preview" type="button">缺少预览图</button>
+              <button class="filter" data-filter="image_without_vpk" type="button">缺少 VPK</button>
+              <button class="filter" data-filter="disabled" type="button">已停用</button>
+            </div>
+            <div id="model-filters" class="filters model-filters hidden" role="tablist" aria-label="模型类型筛选">
+              <button class="sub-filter active" data-model-category="all" type="button">全部模型</button>
+              <button class="sub-filter" data-model-category="survivor_model" type="button">幸存者模型</button>
+              <button class="sub-filter" data-model-category="infected_model" type="button">感染者模型</button>
+              <button class="sub-filter" data-model-category="weapon_model" type="button">武器模型</button>
+              <button class="sub-filter" data-model-category="prop_model" type="button">地图模型</button>
+            </div>
+          </div>
+          <div id="selection-actions" class="selection-actions hidden" aria-label="批量操作">
+            <span class="selection-count">已选择 <strong id="selection-count">0</strong> 个 Mod</span>
+            <button class="outline-button" data-bulk-action="enable" type="button"><i data-lucide="play"></i>启用</button>
+            <button class="outline-button" data-bulk-action="disable" type="button"><i data-lucide="pause"></i>停用</button>
+            <button class="outline-button danger-button" data-bulk-action="delete" type="button"><i data-lucide="trash-2"></i>移入回收站</button>
+            <button id="clear-selection-button" class="icon-button" type="button" title="清空选择" aria-label="清空选择"><i data-lucide="x"></i></button>
+          </div>
+          <label class="sort-control">排序
+            <select id="sort-select">
+              <option value="name">名称</option>
+              <option value="vpk">VPK 数量</option>
+              <option value="status">状态</option>
+            </select>
+          </label>
+        </div>
+
+        <div id="notice" class="notice hidden"></div>
+        <section id="mod-grid" class="mod-grid" aria-live="polite"></section>
+      </section>
+    </main>
+    <div id="operation-overlay" class="operation-overlay hidden" role="status" aria-live="polite" aria-label="正在处理操作">
+      <div class="operation-status">
+        <span class="operation-spinner" aria-hidden="true"></span>
+        <span id="operation-message">正在处理，请稍候…</span>
+      </div>
+    </div>
+    <dialog id="ai-dialog" class="ai-dialog">
+      <div class="ai-dialog-head">
+        <div>
+          <div class="eyebrow">DEEPSEEK ANALYSIS</div>
+          <h2 id="ai-dialog-title">AI 分析</h2>
+        </div>
+        <button id="ai-dialog-close" class="icon-button" type="button" title="关闭" aria-label="关闭 AI 分析"><i data-lucide="x"></i></button>
+      </div>
+      <div class="ai-workspace">
+        <aside class="ai-history-panel">
+          <div class="ai-section-title">分析历史</div>
+          <div id="ai-history-list" class="ai-history-list"></div>
+        </aside>
+        <section class="ai-editor">
+          <div class="ai-prompt-row">
+            <label class="settings-label" for="ai-prompt-select">分析提示词</label>
+            <select id="ai-prompt-select" class="settings-input"></select>
+          </div>
+          <textarea id="ai-prompt-input" class="ai-prompt-input" spellcheck="false"></textarea>
+          <div class="ai-editor-actions">
+            <button id="ai-run-button" class="primary-button" type="button"><i data-lucide="sparkles"></i>开始分析</button>
+            <button id="ai-save-prompt-button" class="outline-button" type="button"><i data-lucide="bookmark-plus"></i>保存为自定义</button>
+            <button id="ai-delete-prompt-button" class="icon-button" type="button" title="删除当前自定义提示词" aria-label="删除当前自定义提示词"><i data-lucide="trash-2"></i></button>
+          </div>
+          <div id="ai-analysis-status" class="ai-analysis-status"></div>
+          <div id="ai-dialog-body" class="ai-dialog-body"></div>
+        </section>
+      </div>
+    </dialog>
+    <dialog id="import-preview-dialog" class="import-preview-dialog">
+      <div class="import-preview-head">
+        <div>
+          <div class="eyebrow">IMPORT INSPECTION</div>
+          <h2>导入检测预览</h2>
+          <p id="import-preview-summary" class="import-preview-summary"></p>
+        </div>
+        <button id="import-preview-close" class="icon-button" type="button" title="完成并关闭" aria-label="完成并关闭导入检测预览"><i data-lucide="x"></i></button>
+      </div>
+      <div id="import-preview-list" class="import-preview-list"></div>
+      <div class="import-preview-foot">
+        <div id="import-preview-status" class="import-preview-status"></div>
+        <button id="import-preview-done" class="primary-button" type="button"><i data-lucide="check"></i>完成导入</button>
+      </div>
+    </dialog>
+    <dialog id="vpk-files-dialog" class="vpk-files-dialog">
+      <div class="vpk-files-head">
+        <div>
+          <div class="eyebrow">MOD FILES</div>
+          <h2 id="vpk-files-title">关联的 VPK 文件</h2>
+          <p id="vpk-files-summary" class="vpk-files-summary"></p>
+          <p id="vpk-files-note" class="vpk-files-note">只有标记为“内容重复”的文件适合优先清理；普通分卷文件请保留。</p>
+        </div>
+        <button id="vpk-files-close" class="icon-button" type="button" title="关闭" aria-label="关闭 VPK 文件详情"><i data-lucide="x"></i></button>
+      </div>
+      <div id="vpk-files-list" class="vpk-files-list"></div>
+    </dialog>
+    <dialog id="nekovpk-dialog" class="nekovpk-dialog">
+      <div class="vpk-files-head">
+        <div>
+          <div class="eyebrow">NEKOVPK TARGETS</div>
+          <h2 id="nekovpk-title">角色调整</h2>
+          <p id="nekovpk-summary" class="vpk-files-summary"></p>
+          <p class="vpk-files-note">只会替换这个 NekoVPK 的预置角色资源，普通 VPK 不受影响。</p>
+        </div>
+        <button id="nekovpk-close" class="icon-button" type="button" title="关闭" aria-label="关闭角色调整"><i data-lucide="x"></i></button>
+      </div>
+      <div id="nekovpk-target-list" class="nekovpk-target-list"></div>
+      <div id="nekovpk-loading" class="nekovpk-loading hidden" role="status" aria-live="polite">
+        <div class="operation-status">
+          <span class="operation-spinner" aria-hidden="true"></span>
+          <span>正在切换角色，请稍候…</span>
+        </div>
+      </div>
+    </dialog>
+    <dialog id="voice-dialog" class="voice-dialog">
+      <div class="vpk-files-head">
+        <div>
+          <div class="eyebrow">VOICE REPLACEMENT</div>
+          <h2 id="voice-title">语音替换</h2>
+          <p id="voice-summary" class="vpk-files-summary"></p>
+          <p class="vpk-files-note">只会按语音文件名覆盖游戏语音，并在安装前备份原文件；不会运行 VPK 内的脚本。</p>
+        </div>
+        <button id="voice-close" class="icon-button" type="button" title="关闭" aria-label="关闭语音替换"><i data-lucide="x"></i></button>
+      </div>
+      <div id="voice-body" class="voice-body"></div>
+      <div class="voice-actions">
+        <button id="voice-install" class="primary-button" type="button"><i data-lucide="download"></i>安装语音包</button>
+        <button id="voice-restore" class="outline-button" type="button"><i data-lucide="undo-2"></i>恢复原始语音</button>
+      </div>
+      <div id="voice-loading" class="nekovpk-loading hidden" role="status" aria-live="polite">
+        <div class="operation-status">
+          <span class="operation-spinner" aria-hidden="true"></span>
+          <span id="voice-loading-message">正在处理语音包，请稍候…</span>
+        </div>
+      </div>
+    </dialog>
+    <aside id="ai-settings-panel" class="ai-settings-panel hidden" aria-label="AI 设置">
+      <div class="ai-settings-head">
+        <div>
+          <div class="eyebrow">MODEL CONNECTION</div>
+          <h2>AI 设置</h2>
+        </div>
+        <button id="ai-settings-close" class="icon-button" type="button" title="关闭" aria-label="关闭 AI 设置"><i data-lucide="x"></i></button>
+      </div>
+      <div class="ai-settings-form">
+        <label class="settings-label" for="ai-model-select">大模型</label>
+        <select id="ai-model-select" class="settings-input">
+          <option value="deepseek-chat">DeepSeek Chat（通用）</option>
+          <option value="deepseek-reasoner">DeepSeek Reasoner（推理）</option>
+        </select>
+        <label class="settings-label" for="deepseek-key-input">DeepSeek API Key</label>
+        <input id="deepseek-key-input" class="settings-input" type="password" autocomplete="off" placeholder="已配置时留空即可保留" />
+        <div class="ai-settings-actions">
+          <button id="ai-settings-save" class="primary-button" type="button"><i data-lucide="save"></i>保存配置</button>
+          <button id="ai-settings-clear" class="outline-button" type="button">清除 Key</button>
+        </div>
+        <div id="ai-settings-status" class="ai-settings-status"></div>
+      </div>
+    </aside>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
