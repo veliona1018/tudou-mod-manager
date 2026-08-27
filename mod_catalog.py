@@ -15,10 +15,19 @@ from vpk_detector import (
     read_vpk_paths,
 )
 from nekovpk import NekoVPKError, inspect_nekovpk
+from voice_replacement import detect_voice_replacement_mode, detect_voice_roles
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 VPK_EXTENSIONS = {".vpk", ".vpk1"}
+GENERATED_SPRAY_VPK = "l4d2modmanager_spraycollection.vpk"
+ARCHIVE_EXTENSIONS = {".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar"}
+IGNORED_DATA_DIRECTORIES = {
+    "workshop",
+    "tudou mod manger",
+    ".l4d2_mod_manager_spray_previews",
+    ".l4d2_voice_backups",
+}
 METADATA_FILE = ".l4d2_mod_manager.json"
 PART_SUFFIX = re.compile(r"(?:[ _.-]?(?:part|vol|chunk)[ _.-]?\d+)$", re.IGNORECASE)
 NUMBER_SUFFIX = re.compile(r"^(.*?)[ _.-]?\d{1,2}$")
@@ -70,6 +79,32 @@ def _mission_names(paths: list[str]) -> set[str]:
         for path in paths
         if path.startswith("missions/") and path.endswith((".txt", ".res"))
     }
+
+
+def _embedded_archive_paths(paths: list[str]) -> list[str]:
+    """Find archive files stored inside a VPK without opening or extracting them."""
+
+    return sorted(
+        {
+            path.replace("\\", "/")
+            for path in paths
+            if Path(path).suffix.casefold() in ARCHIVE_EXTENSIONS
+        }
+    )
+
+
+def _is_pure_archive_package(paths: list[str], archive_paths: list[str]) -> bool:
+    """Return whether the VPK is an archive container rather than a normal Mod."""
+
+    if not archive_paths:
+        return False
+    metadata_names = {"addoninfo.txt", "addonimage.jpg", "addonimage.png"}
+    content_paths = [
+        path
+        for path in paths
+        if Path(path).name.casefold() not in metadata_names
+    ]
+    return bool(content_paths) and all(path in archive_paths for path in content_paths)
 
 
 def _group_stems(stems: list[str], exact_image_keys: set[str] | None = None) -> dict[str, str]:
@@ -229,8 +264,20 @@ def save_hidden_tags(root: str | Path, hidden: dict[str, dict[str, str]]) -> Non
 
 def build_catalog(root: str | Path) -> list[dict]:
     root_path = Path(root)
-    all_files = [path for path in root_path.rglob("*") if path.is_file()]
-    vpk_files = sorted(path for path in all_files if path.suffix.casefold() in VPK_EXTENSIONS)
+    all_files = [
+        path
+        for path in root_path.rglob("*")
+        if path.is_file()
+        and not (
+            path.relative_to(root_path).parts
+            and path.relative_to(root_path).parts[0].casefold() in IGNORED_DATA_DIRECTORIES
+        )
+    ]
+    vpk_files = sorted(
+        path for path in all_files
+        if path.suffix.casefold() in VPK_EXTENSIONS
+        and path.name.casefold() != GENERATED_SPRAY_VPK
+    )
     image_files = sorted(path for path in all_files if path.suffix.casefold() in IMAGE_EXTENSIONS)
     custom_names = load_custom_names(root_path)
     custom_tags = load_custom_tags(root_path)
@@ -359,11 +406,23 @@ def build_catalog(root: str | Path) -> list[dict]:
         errors: list[dict] = []
         detections: list[dict] = []
         for vpk in files:
+            internal_paths: list[str] = []
+            embedded_archives: list[str] = []
             try:
+                internal_paths = read_vpk_paths(vpk)
+                embedded_archives = _embedded_archive_paths(internal_paths)
+                pure_archive = _is_pure_archive_package(internal_paths, embedded_archives)
                 detection = analyze_vpk(vpk)
+                if pure_archive:
+                    detection["categories"] = sorted(set(detection.get("categories", [])) | {"archive"})
+                    detection["signals"] = {
+                        **detection.get("signals", {}),
+                        "archive": embedded_archives[:12],
+                    }
+                    detection["embeddedArchives"] = embedded_archives
                 if any(
                     path.startswith("nekovpk/") and path.endswith(".neko7z")
-                    for path in read_vpk_paths(vpk)
+                    for path in internal_paths
                 ):
                     try:
                         detection["nekovpk"] = {
@@ -377,8 +436,31 @@ def build_catalog(root: str | Path) -> list[dict]:
                             "error": str(error),
                             "targets": [],
                         }
+                if "voice_replacement" in detection.get("categories", []):
+                    detection["voiceRoles"] = detect_voice_roles(internal_paths)
+                    voice_mode = detect_voice_replacement_mode(vpk, internal_paths)
+                    if voice_mode:
+                        detection["voiceMode"] = voice_mode
+                        detection["categories"].append(f"voice_{voice_mode}")
                 detections.append(detection)
-            except (OSError, VPKFormatError, VPKClassificationError) as error:
+            except VPKClassificationError as error:
+                if pure_archive:
+                    detections.append(
+                        {
+                            "primary": "archive",
+                            "categories": ["archive"],
+                            "confidence": "high",
+                            "file_count": len(internal_paths),
+                            "characterTargets": [],
+                            "weaponTargets": [],
+                            "signals": {"archive": embedded_archives[:12]},
+                            "scores": {"archive": 100},
+                            "embeddedArchives": embedded_archives,
+                        }
+                    )
+                else:
+                    errors.append({"file": vpk.name, "error": str(error)})
+            except (OSError, VPKFormatError) as error:
                 errors.append({"file": vpk.name, "error": str(error)})
 
         categories = sorted(
@@ -395,6 +477,9 @@ def build_catalog(root: str | Path) -> list[dict]:
                 if detection.get("primary")
             }
         )
+        if any("archive" in detection.get("categories", []) for detection in detections):
+            primary_categories.append("archive")
+            primary_categories = sorted(set(primary_categories))
         character_targets: dict[tuple[str, str], dict] = {}
         for detection in detections:
             for target in detection.get("characterTargets", []):
@@ -420,6 +505,13 @@ def build_catalog(root: str | Path) -> list[dict]:
             if isinstance(detection.get("nekovpk"), dict)
         ]
         nekovpk = nekovpk_infos[0] if len(nekovpk_infos) == 1 else None
+        voice_roles_by_id: dict[str, dict] = {}
+        voice_modes: set[str] = set()
+        for detection in detections:
+            for role in detection.get("voiceRoles", []):
+                voice_roles_by_id.setdefault(role["id"], role)
+            if detection.get("voiceMode") in {"automatic", "manual"}:
+                voice_modes.add(detection["voiceMode"])
         catalog.append(
             {
                 "id": group_key,
@@ -451,6 +543,8 @@ def build_catalog(root: str | Path) -> list[dict]:
                 "characterTargets": sorted(character_targets.values(), key=lambda item: item["name"]),
                 "weaponTargets": sorted(weapon_targets.values(), key=lambda item: item["name"]),
                 "nekovpk": nekovpk,
+                "voiceRoles": list(voice_roles_by_id.values()),
+                "voiceModes": sorted(voice_modes),
                 "detections": detections,
                 "errors": errors,
                 "status": "matched" if preview else "missing_preview",
@@ -491,6 +585,8 @@ def build_catalog(root: str | Path) -> list[dict]:
                     "characterTargets": [],
                     "weaponTargets": [],
                     "nekovpk": None,
+                    "voiceRoles": [],
+                    "voiceModes": [],
                     "detections": [],
                     "errors": [],
                     "status": "image_without_vpk",

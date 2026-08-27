@@ -1,9 +1,12 @@
 const state = {
-  mods: [], category: "all", modelFilter: "all", filter: "all", search: "", sort: "name", selectedIds: new Set(),
+  mods: [], category: "all", roleSide: "survivor", modelFilter: "all", filter: "all", search: "", sort: "name", selectedIds: new Set(),
 };
+
+const NAV_ORDER_STORAGE_KEY = "l4d2-mod-manager.nav-order";
 
 const labels = {
   map: "地图",
+  archive: "压缩包",
   spray: "喷漆",
   survivor_model: "幸存者模型",
   infected_model: "感染者模型",
@@ -11,6 +14,8 @@ const labels = {
   prop_model: "环境模型",
   sound: "音效",
   voice_replacement: "语音替换",
+  voice_manual: "手动替换语音",
+  voice_automatic: "自动替换语音",
   texture: "材质",
   ui: "界面",
   script: "脚本/功能",
@@ -25,6 +30,7 @@ const statusLabels = {
 const viewTitles = {
   all: "我的 Mod",
   map: "地图 Mod",
+  archive: "压缩包 Mod",
   model: "模型 Mod",
   survivor_target: "生还者角色调整",
   voice_replacement: "语音替换 Mod",
@@ -32,6 +38,8 @@ const viewTitles = {
 };
 
 const rootPath = document.querySelector("#root-path");
+const shell = document.querySelector(".shell");
+const sidebarToggleButton = document.querySelector("#settings-button");
 const grid = document.querySelector("#mod-grid");
 const notice = document.querySelector("#notice");
 const operationOverlay = document.querySelector("#operation-overlay");
@@ -58,12 +66,44 @@ const importPreviewList = document.querySelector("#import-preview-list");
 const importPreviewSummary = document.querySelector("#import-preview-summary");
 const importPreviewStatus = document.querySelector("#import-preview-status");
 const importPreviewClose = document.querySelector("#import-preview-close");
+const workshopDialog = document.querySelector("#workshop-dialog");
+const workshopSummary = document.querySelector("#workshop-summary");
+const workshopList = document.querySelector("#workshop-list");
+const workshopStatus = document.querySelector("#workshop-status");
+const workshopSelectAll = document.querySelector("#workshop-select-all");
+const workshopSelectedCount = document.querySelector("#workshop-selected-count");
+const workshopCopy = document.querySelector("#workshop-copy");
+const workshopClose = document.querySelector("#workshop-close");
+const workshopLoading = document.querySelector("#workshop-loading");
+const workshopLoadingMessage = document.querySelector("#workshop-loading-message");
 const vpkFilesDialog = document.querySelector("#vpk-files-dialog");
 const vpkFilesTitle = document.querySelector("#vpk-files-title");
 const vpkFilesSummary = document.querySelector("#vpk-files-summary");
 const vpkFilesNote = document.querySelector("#vpk-files-note");
 const vpkFilesList = document.querySelector("#vpk-files-list");
 const vpkFilesClose = document.querySelector("#vpk-files-close");
+const sprayDialog = document.querySelector("#spray-dialog");
+const spraySummary = document.querySelector("#spray-summary");
+const spraySlotSummary = document.querySelector("#spray-slot-summary");
+const spraySlotUsage = document.querySelector("#spray-slot-usage");
+const sprayList = document.querySelector("#spray-list");
+const sprayStatus = document.querySelector("#spray-status");
+const sprayTabs = document.querySelectorAll(".spray-tab");
+const sprayImportButton = document.querySelector("#spray-import-button");
+const sprayImportInput = document.querySelector("#spray-import-input");
+const sprayDropOverlay = document.querySelector("#spray-drop-overlay");
+const sprayApply = document.querySelector("#spray-apply");
+const sprayReset = document.querySelector("#spray-reset");
+const sprayClose = document.querySelector("#spray-close");
+const sprayLoading = document.querySelector("#spray-loading");
+const sprayLoadingMessage = document.querySelector("#spray-loading-message");
+const sprayConfigDialog = document.querySelector("#spray-config-dialog");
+const sprayConfigSummary = document.querySelector("#spray-config-summary");
+const sprayConfigBody = document.querySelector("#spray-config-body");
+const sprayConfigStatus = document.querySelector("#spray-config-status");
+const sprayConfigSave = document.querySelector("#spray-config-save");
+const sprayConfigCancel = document.querySelector("#spray-config-cancel");
+const sprayConfigClose = document.querySelector("#spray-config-close");
 const nekoVpkDialog = document.querySelector("#nekovpk-dialog");
 const nekoVpkTitle = document.querySelector("#nekovpk-title");
 const nekoVpkSummary = document.querySelector("#nekovpk-summary");
@@ -80,12 +120,181 @@ const voiceRestore = document.querySelector("#voice-restore");
 const voiceLoading = document.querySelector("#voice-loading");
 const voiceLoadingMessage = document.querySelector("#voice-loading-message");
 let activeImportMods = [];
+let workshopMods = [];
+let workshopSelectedIds = new Set();
 let sourceVersion = null;
 let reloadRequested = false;
 let activeAiMod = null;
 let aiPrompts = { default: null, custom: [] };
 let aiHistory = [];
 let operationBusy = false;
+let sprayAssets = [];
+let sprayAssignments = {};
+let spraySourceTab = "mod";
+let sprayPendingPreviews = 0;
+let sprayDragDepth = 0;
+let sprayConfigAsset = null;
+let sprayConfigDraft = null;
+let sprayConfigPreviewTimer = null;
+let sprayAssetsNeedRefresh = true;
+const standardSpraySlots = Array.from({ length: 16 }, (_, index) => String(index + 1));
+const SIDEBAR_STATE_STORAGE_KEY = "l4d2-mod-manager.sidebar-collapsed";
+
+function setSidebarCollapsed(collapsed, persist = true) {
+  shell.classList.toggle("sidebar-collapsed", collapsed);
+  sidebarToggleButton.setAttribute("aria-pressed", String(collapsed));
+  sidebarToggleButton.title = collapsed ? "显示左侧操作栏" : "隐藏左侧操作栏";
+  sidebarToggleButton.setAttribute("aria-label", sidebarToggleButton.title);
+  if (persist) localStorage.setItem(SIDEBAR_STATE_STORAGE_KEY, String(collapsed));
+}
+
+function toggleSidebar() {
+  closeAiSettings();
+  setSidebarCollapsed(!shell.classList.contains("sidebar-collapsed"));
+}
+
+function restoreSidebarState() {
+  setSidebarCollapsed(localStorage.getItem(SIDEBAR_STATE_STORAGE_KEY) === "true", false);
+}
+
+function restoreNavOrder() {
+  const nav = document.querySelector(".nav");
+  if (!nav) return;
+  let savedOrder = [];
+  try {
+    const parsed = JSON.parse(localStorage.getItem(NAV_ORDER_STORAGE_KEY) || "[]");
+    savedOrder = Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string") : [];
+  } catch {
+    savedOrder = [];
+  }
+  const items = new Map([...nav.querySelectorAll(".nav-item")].map((item) => [item.dataset.navId, item]));
+  const orderedIds = [
+    "library",
+    ...savedOrder.filter((id) => id !== "library" && items.has(id)),
+    ...[...items.keys()].filter((id) => id !== "library" && !savedOrder.includes(id)),
+  ];
+  orderedIds.forEach((id) => {
+    const item = items.get(id);
+    if (item) nav.appendChild(item);
+  });
+}
+
+function saveNavOrder() {
+  const nav = document.querySelector(".nav");
+  if (!nav) return;
+  const order = [...nav.querySelectorAll(".nav-item")].map((item) => item.dataset.navId).filter(Boolean);
+  try {
+    localStorage.setItem(NAV_ORDER_STORAGE_KEY, JSON.stringify(order));
+  } catch {
+    // Navigation still works when browser storage is unavailable.
+  }
+}
+
+function initializeNavDragging() {
+  const nav = document.querySelector(".nav");
+  if (!nav) return;
+  let draggedItem = null;
+  let pressedItem = null;
+  let pointerId = null;
+  let pressTimer = null;
+  let pressStart = null;
+  let dragStarted = false;
+  let suppressClickUntil = 0;
+
+  const clearPressTimer = () => {
+    if (pressTimer !== null) {
+      window.clearTimeout(pressTimer);
+      pressTimer = null;
+    }
+  };
+
+  const clearDropTargets = () => {
+    nav.querySelectorAll(".drop-target").forEach((item) => item.classList.remove("drop-target"));
+  };
+
+  const finishDrag = (event, cancelled = false) => {
+    clearPressTimer();
+    const item = draggedItem || pressedItem;
+    if (dragStarted) {
+      event?.preventDefault();
+      suppressClickUntil = Date.now() + 500;
+      if (!cancelled) saveNavOrder();
+    }
+    item?.classList.remove("drag-ready", "dragging");
+    clearDropTargets();
+    try {
+      if (pointerId !== null && item?.hasPointerCapture(pointerId)) item.releasePointerCapture(pointerId);
+    } catch {
+      // Pointer capture may already have been released by the browser.
+    }
+    draggedItem = null;
+    pressedItem = null;
+    pointerId = null;
+    pressStart = null;
+    dragStarted = false;
+  };
+
+  const handlePointerMove = (event) => {
+    if (pointerId !== event.pointerId || !pressedItem || !pressStart) return;
+    const moved = Math.hypot(event.clientX - pressStart.x, event.clientY - pressStart.y);
+    if (!draggedItem) {
+      if (moved <= 8) return;
+      clearPressTimer();
+      draggedItem = pressedItem;
+      dragStarted = true;
+      draggedItem.classList.add("dragging");
+    }
+    if (!dragStarted) {
+      if (moved < 6) return;
+      dragStarted = true;
+      draggedItem.classList.remove("drag-ready");
+      draggedItem.classList.add("dragging");
+    }
+    event.preventDefault();
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest(".nav-item");
+    clearDropTargets();
+    if (!target || target.parentElement !== nav || target === draggedItem || target.classList.contains("nav-pinned")) return;
+    target.classList.add("drop-target");
+    const bounds = target.getBoundingClientRect();
+    nav.insertBefore(draggedItem, event.clientY < bounds.top + bounds.height / 2 ? target : target.nextSibling);
+  };
+
+  nav.querySelectorAll(".nav-item").forEach((item) => {
+    if (item.classList.contains("nav-pinned")) return;
+    item.setAttribute("draggable", "false");
+    item.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || pressedItem || pointerId !== null) return;
+      pressedItem = item;
+      pointerId = event.pointerId;
+      pressStart = { x: event.clientX, y: event.clientY };
+      try {
+        item.setPointerCapture(pointerId);
+      } catch {
+        // Continue with window-level pointer events if capture is unavailable.
+      }
+      pressTimer = window.setTimeout(() => {
+        if (pressedItem !== item || pointerId === null) return;
+        draggedItem = item;
+        item.classList.add("drag-ready");
+      }, 260);
+    });
+    item.addEventListener("click", (event) => {
+      if (Date.now() < suppressClickUntil) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        suppressClickUntil = 0;
+      }
+    });
+  });
+  window.addEventListener("pointermove", handlePointerMove, { passive: false });
+  window.addEventListener("pointerup", (event) => {
+    if (pointerId === event.pointerId) finishDrag(event);
+  });
+  window.addEventListener("pointercancel", (event) => {
+    if (pointerId === event.pointerId) finishDrag(event, true);
+  });
+  window.addEventListener("blur", () => finishDrag(null, true));
+}
 
 function runExclusiveOperation(message, task) {
   if (operationBusy) return Promise.resolve(false);
@@ -137,6 +346,18 @@ function effectivePrimaryCategories(mod) {
   return [...new Set([...(mod.primaryCategories || []), ...markedCategories])];
 }
 
+function visibleStatusLabel(mod) {
+  const isVoiceReplacement = (mod.primaryCategories || []).includes("voice_replacement");
+  const isAutomaticVoice = isVoiceReplacement
+    && (mod.voiceModes || []).includes("automatic")
+    && !(mod.voiceModes || []).includes("manual");
+  if (isVoiceReplacement && !isAutomaticVoice) return mod.voiceInstalled === true ? "已替换" : "未替换";
+  if (isAutomaticVoice) return mod.enabled === false ? "已停用" : "已启用";
+  if ((mod.modelConflicts || []).length) return "模型冲突";
+  if (mod.enabled === false && mod.vpkFiles?.length) return "已停用";
+  return statusLabels[mod.status] || "检测错误";
+}
+
 function visibleMods() {
   const query = state.search.trim().toLowerCase();
   const filtered = state.mods.filter((mod) => {
@@ -152,21 +373,29 @@ function visibleMods() {
       ...Object.values(mod.tagOverrides || {}),
     ].join(" ").toLowerCase();
     const filterMatch = state.filter === "all"
-      || (state.filter === "disabled" ? mod.enabled === false : mod.status === state.filter);
+      || (state.filter === "disabled" ? mod.enabled === false
+        : state.filter === "conflict" ? (mod.modelConflicts || []).length > 0
+          : mod.status === state.filter);
     const primaryCategories = effectivePrimaryCategories(mod);
-    const hasSurvivorTarget = (mod.characterTargets || []).some((target) => target.side === "survivor");
+    const hasRoleTarget = getModelTargets(mod).some((target) => target.side === state.roleSide);
     const categoryMatch = state.category === "all"
       || primaryCategories.includes(state.category)
       || (state.category === "model" && primaryCategories.some((category) => category.endsWith("_model")))
-      || (state.category === "survivor_target" && hasSurvivorTarget);
+      || (state.category === "survivor_target" && hasRoleTarget);
     const modelMatch = state.category !== "model"
       || state.modelFilter === "all"
       || primaryCategories.includes(state.modelFilter);
     return filterMatch && categoryMatch && modelMatch && (!query || haystack.includes(query));
   });
   return filtered.sort((left, right) => {
-    if (state.sort === "vpk") return right.vpkFiles.length - left.vpkFiles.length;
-    if (state.sort === "status") return left.status.localeCompare(right.status);
+    if (state.sort === "vpk") {
+      const vpkDifference = right.vpkFiles.length - left.vpkFiles.length;
+      if (vpkDifference) return vpkDifference;
+    }
+    if (state.sort === "status") {
+      const statusDifference = visibleStatusLabel(left).localeCompare(visibleStatusLabel(right), "zh-CN");
+      if (statusDifference) return statusDifference;
+    }
     return left.name.localeCompare(right.name, "zh-CN");
   });
 }
@@ -180,17 +409,17 @@ function renderStats() {
   document.querySelector("#total-label").textContent = isFiltered ? "当前视图" : "全部 Mod";
   document.querySelector("#total-count").textContent = mods.length;
   document.querySelector("#matched-count").textContent = mods.filter((mod) => mod.status === "matched").length;
-  document.querySelector("#issue-count").textContent = mods.filter((mod) => mod.status !== "matched" || mod.errors.length).length;
+  document.querySelector("#issue-count").textContent = mods.filter((mod) => (
+    mod.status !== "matched" || mod.errors.length || (mod.modelConflicts || []).length
+  )).length;
 }
 
 function renderViewTitle() {
-  const title = viewTitles[state.category] || viewTitles.all;
+  const title = state.category === "survivor_target"
+    ? (state.roleSide === "infected" ? "感染者角色调整" : "生还者角色调整")
+    : (viewTitles[state.category] || viewTitles.all);
   document.querySelector("#page-title").textContent = title;
-  document.querySelector("#page-eyebrow").textContent = state.category === "survivor_target"
-    ? "SURVIVOR MODEL TOOLS / 02"
-    : state.category === "voice_replacement"
-      ? "VOICE REPLACEMENT / 03"
-    : "SURVIVAL LIBRARY / 01";
+  document.querySelector("#spray-manager-button").classList.toggle("hidden", state.category !== "spray");
 }
 
 function renderSelectionActions() {
@@ -226,6 +455,9 @@ function getTagItems(mod) {
       primaryCategories.includes("weapon_model"),
     );
   });
+  (mod.voiceRoles || []).forEach((role) => {
+    addTag(`voice:${role.id}`, `语音替换 · ${role.name}`, primaryCategories.includes("voice_replacement"));
+  });
   (mod.categories || []).forEach((category) => {
     addTag(
       `category:${category}`,
@@ -246,16 +478,24 @@ function setCustomTagMarked(mod, key, marked) {
 
 function renderCard(mod) {
   const isVoiceReplacement = (mod.primaryCategories || []).includes("voice_replacement");
+  const isSpray = (mod.primaryCategories || []).includes("spray");
+  const isAutomaticVoice = isVoiceReplacement
+    && (mod.voiceModes || []).includes("automatic")
+    && !(mod.voiceModes || []).includes("manual");
   const voiceInstalled = mod.voiceInstalled === true;
   const disabled = mod.enabled === false && mod.vpkFiles.length > 0;
+  const modelConflicts = mod.modelConflicts || [];
   const selected = state.selectedIds.has(mod.id);
-  const status = isVoiceReplacement
+  const status = isVoiceReplacement && !isAutomaticVoice
     ? (voiceInstalled ? "已替换" : "未替换")
-    : (disabled ? "已停用" : (statusLabels[mod.status] || "检测错误"));
-  const issue = mod.status !== "matched" || mod.errors.length > 0 || (isVoiceReplacement && !voiceInstalled);
+    : (isAutomaticVoice ? (disabled ? "已停用" : "已启用") : (modelConflicts.length ? "模型冲突" : (disabled ? "已停用" : (statusLabels[mod.status] || "检测错误"))));
+  const issue = mod.status !== "matched" || mod.errors.length > 0 || (isVoiceReplacement && !isAutomaticVoice && !voiceInstalled) || modelConflicts.length > 0;
   const hiddenTags = mod.hiddenTags || {};
   const tagItems = getTagItems(mod);
-  const tags = tagItems.map((item) => `<span class="tag ${item.primary ? "primary" : ""}">${escapeHtml(item.label)}</span>`).join("") || `<span class="tag">未分类</span>`;
+  const displayTagItems = state.category === "archive"
+    ? tagItems.filter((item) => item.key === "category:archive")
+    : tagItems;
+  const tags = displayTagItems.map((item) => `<span class="tag ${item.primary ? "primary" : ""}">${escapeHtml(item.label)}</span>`).join("") || `<span class="tag">未分类</span>`;
   const tagMenuItems = tagItems.map((item) => `
     <div class="tag-menu-row">
       <button class="tag-menu-item" data-action="edit-tag" data-mod-id="${escapeHtml(mod.id)}" data-tag-key="${escapeHtml(item.key)}" type="button"><i data-lucide="pencil"></i><span>${escapeHtml(item.label)}</span></button>
@@ -275,23 +515,30 @@ function renderCard(mod) {
     ? `<img src="${fileUrl(mod.preview)}" alt="${escapeHtml(mod.name)} 预览图" loading="lazy" />`
     : `<div class="preview missing"><i data-lucide="image-off"></i></div>`;
   const error = mod.errors.length ? `<div class="error-line">${escapeHtml(mod.errors[0].error)}</div>` : "";
+  const conflictLine = modelConflicts.length
+    ? `<div class="model-conflict-line" title="${escapeHtml(modelConflicts.map((item) => `${modelTargetLabel(item.target)}：${item.otherMods.join("、")}`).join("；"))}">模型冲突：${escapeHtml(modelConflicts.slice(0, 2).map((item) => `${modelTargetLabel(item.target)} 与 ${item.otherMods.join("、")}`).join("；"))}${modelConflicts.length > 2 ? "；…" : ""}</div>`
+    : "";
   const nekoVpkTargets = mod.nekovpk?.targets || [];
-  const hasNekoVpkTargets = nekoVpkTargets.length > 1;
-  const voiceActionLabel = voiceInstalled ? "恢复语音" : "安装语音";
+  const hasExperimentalNekoVpkTargets = (mod.nekovpk?.mapping?.targets || []).some((target) => target.ready === true);
+  const hasNekoVpkTargets = nekoVpkTargets.length > 1 || hasExperimentalNekoVpkTargets;
+  const voiceActionLabel = isAutomaticVoice ? "查看语音" : (voiceInstalled ? "恢复语音" : "安装语音");
+  const voiceActionIcon = isAutomaticVoice ? "eye" : (voiceInstalled ? "undo-2" : "mic-2");
+  const voiceActionTitle = isAutomaticVoice ? "查看自动加载的语音文件" : (voiceInstalled ? "恢复原始语音" : "安装语音替换");
   return `<article class="mod-card ${selected ? "selected" : ""}">
     <div class="preview ${mod.preview ? "" : "missing"}">
       ${preview}
-    <span class="status-chip ${isVoiceReplacement ? (voiceInstalled ? "voice-installed" : "voice-uninstalled") : (disabled ? "disabled" : (issue ? "issue" : ""))}">${escapeHtml(status)}</span>
+    <span class="status-chip ${modelConflicts.length ? "model-conflict" : (isVoiceReplacement && !isAutomaticVoice ? (voiceInstalled ? "voice-installed" : "voice-uninstalled") : (disabled ? "disabled" : (issue ? "issue" : "")))}">${escapeHtml(status)}</span>
     </div>
     <div class="card-body">
       <div class="card-title"><label class="card-select" title="选择 ${escapeHtml(mod.name)}"><input class="card-select-input" type="checkbox" data-mod-id="${escapeHtml(mod.id)}" ${selected ? "checked" : ""} /><span class="sr-only">选择 ${escapeHtml(mod.name)}</span></label><h2 title="${escapeHtml(mod.name)}">${escapeHtml(mod.name)}</h2><button class="more-button" data-action="toggle-tag-menu" data-mod-id="${escapeHtml(mod.id)}" type="button" title="编辑标签" aria-label="编辑 ${escapeHtml(mod.name)} 的标签"><i data-lucide="more-horizontal"></i></button>${tagMenu}</div>
       <div class="tags">${tags}</div>
       <button class="vpk-line" data-action="show-vpk-files" data-mod-id="${escapeHtml(mod.id)}" type="button" title="查看关联的 VPK 文件" aria-label="查看 ${escapeHtml(mod.name)} 的关联 VPK 文件"><i data-lucide="package"></i><strong>${mod.vpkFiles.length}</strong> 个 VPK 文件<i class="vpk-line-arrow" data-lucide="chevron-right"></i></button>
       ${error}
+      ${conflictLine}
       <div class="card-actions">
         ${mod.vpkFiles.length && !isVoiceReplacement ? `<button class="card-action toggle-enabled" data-action="toggle-enabled" data-mod-id="${escapeHtml(mod.id)}" type="button" title="${disabled ? "启用 VPK 文件" : "停用 VPK 文件"}"><i data-lucide="${disabled ? "play" : "pause"}"></i>${disabled ? "启用" : "停用"}</button>` : ""}
-        ${hasNekoVpkTargets ? `<button class="card-action" data-action="show-nekovpk" data-mod-id="${escapeHtml(mod.id)}" type="button" title="切换 NekoVPK 生还者角色"><i data-lucide="arrow-right-left"></i>角色调整</button>` : ""}
-        ${isVoiceReplacement ? `<button class="card-action" data-action="show-voice" data-mod-id="${escapeHtml(mod.id)}" type="button" title="${voiceInstalled ? "恢复原始语音" : "安装语音替换"}"><i data-lucide="${voiceInstalled ? "undo-2" : "mic-2"}"></i>${voiceActionLabel}</button>` : ""}
+        ${hasNekoVpkTargets ? `<button class="card-action" data-action="show-nekovpk" data-mod-id="${escapeHtml(mod.id)}" type="button" title="打开生还者角色替换"><i data-lucide="arrow-right-left"></i>替换角色</button>` : ""}
+        ${isVoiceReplacement ? `<button class="card-action" data-action="show-voice" data-mod-id="${escapeHtml(mod.id)}" type="button" title="${voiceActionTitle}"><i data-lucide="${voiceActionIcon}"></i>${voiceActionLabel}</button>` : ""}
         <button class="card-action" data-action="rename" data-mod-id="${escapeHtml(mod.id)}" type="button"><i data-lucide="pencil"></i>重命名</button>
         <button class="card-action danger" data-action="delete" data-mod-id="${escapeHtml(mod.id)}" type="button" title="删除 Mod" aria-label="删除 ${escapeHtml(mod.name)}"><i data-lucide="trash-2"></i></button>
       </div>
@@ -357,12 +604,13 @@ function openVpkFiles(mod) {
 
 function renderNekoVpkTargets(mod, info) {
   const targets = info.targets || [];
-  nekoVpkTitle.textContent = `${mod.name} · 角色调整`;
+  const mappingTargets = (info.mapping?.targets || []).filter((target) => target.id !== info.currentTarget);
+  nekoVpkTitle.textContent = `${mod.name} · 替换角色`;
   nekoVpkSummary.textContent = info.currentName
     ? `当前替换：${info.currentName}，可用预置角色 ${targets.length} 个`
     : `已发现 ${targets.length} 个可用预置角色`;
-  nekoVpkTargetList.innerHTML = targets.length
-    ? targets.map((target) => {
+  const presetHtml = targets.length
+    ? `<div class="nekovpk-section-label">作者预置资源</div>${targets.map((target) => {
       const current = target.id === info.currentTarget;
       const sourceLabel = target.source === "neko7z"
         ? `预置资源 · ${target.fileCount} 个文件`
@@ -374,14 +622,28 @@ function renderNekoVpkTargets(mod, info) {
         <span class="nekovpk-target-info"><strong>${escapeHtml(target.name)}</strong><span>${escapeHtml(sourceLabel)}</span></span>
         <span class="nekovpk-target-state">${current ? "当前" : "切换"}</span>
       </button>`;
-    }).join("")
+    }).join("")}`
     : `<div class="vpk-files-empty">没有发现可用的角色资源</div>`;
+  const mappingHtml = mappingTargets.length
+    ? `<div class="nekovpk-section-label experimental">实验性角色替换 · 源角色：${escapeHtml(info.mapping?.sourceName || "未知")}</div>
+      <p class="nekovpk-experimental-note">只改资源路径，不改模型骨骼；未通过游戏实测前请保留备份。</p>
+      ${mappingTargets.map((target) => {
+        const warnings = (target.warnings || []).join("；");
+        const disabled = target.ready !== true;
+        return `<button class="nekovpk-target experimental ${disabled ? "unavailable" : ""}" data-action="map-nekovpk" data-mod-id="${escapeHtml(mod.id)}" data-target-id="${escapeHtml(target.id)}" type="button" title="${escapeHtml(warnings)}" ${disabled ? "disabled" : ""}>
+          <span class="nekovpk-target-icon"><i data-lucide="${disabled ? "alert-triangle" : "flask-conical"}"></i></span>
+          <span class="nekovpk-target-info"><strong>替换为 ${escapeHtml(target.name)}</strong><span>${disabled ? escapeHtml(warnings) : `实验性替换 · ${target.fileCount} 个文件`}</span></span>
+          <span class="nekovpk-target-state">${disabled ? "不可用" : "替换"}</span>
+        </button>`;
+      }).join("")}`
+    : "";
+  nekoVpkTargetList.innerHTML = presetHtml + mappingHtml;
   if (window.lucide) lucide.createIcons();
 }
 
 async function openNekoVpk(mod) {
   nekoVpkDialog.dataset.modId = mod.id;
-  nekoVpkTitle.textContent = `${mod.name} · 角色调整`;
+  nekoVpkTitle.textContent = `${mod.name} · 替换角色`;
   nekoVpkSummary.textContent = "正在读取 NekoVPK 预置角色…";
   nekoVpkTargetList.innerHTML = `<div class="vpk-files-empty">正在读取…</div>`;
   if (typeof nekoVpkDialog.showModal === "function") nekoVpkDialog.showModal();
@@ -398,36 +660,50 @@ async function openNekoVpk(mod) {
 }
 
 function renderVoiceInfo(mod, info) {
+  const isAutomaticVoice = (mod.voiceModes || []).includes("automatic")
+    && !(mod.voiceModes || []).includes("manual");
   voiceDialog.dataset.modId = mod.id;
   voiceTitle.textContent = `${mod.name} · 语音替换`;
-  voiceSummary.textContent = info.installed
+  voiceSummary.textContent = isAutomaticVoice
+    ? `标准 VPK 语音包 · 启用 VPK 后自动加载 · ${info.sourceFileCount} 个语音文件`
+    : info.installed
     ? `已安装 · ${info.sourceFileCount} 个语音文件 · 可恢复原始语音`
     : `检测到 ${info.roles.length} 个角色、${info.sourceFileCount} 个语音文件`;
   const roleRows = (info.roles || []).map((role) => {
-    const directories = (role.targetDirectories || []).map((directory) =>
+    const directories = isAutomaticVoice
+      ? `<span class="voice-directory">VPK 内置路径 · 启用后自动加载</span>`
+      : (role.targetDirectories || []).map((directory) =>
       `<span class="voice-directory">${escapeHtml(directory.root)} · 覆盖 ${directory.overwrite} / 新增 ${directory.new}</span>`
-    ).join("");
-    const missing = (role.missingDirectories || []).map((directory) =>
+      ).join("");
+    const missing = isAutomaticVoice ? "" : (role.missingDirectories || []).map((directory) =>
       `<span class="voice-directory missing">缺少 ${escapeHtml(directory)}</span>`
     ).join("");
+    const count = isAutomaticVoice
+      ? `<span>${role.sourceFileCount} 个文件</span>`
+      : `<span>${role.overwriteCount} 覆盖</span><span>${role.newCount} 新增</span>`;
     return `<div class="voice-role-row">
       <div class="voice-role-name"><strong>${escapeHtml(role.name)}</strong><span>${role.sourceFileCount} 个 WAV</span></div>
       <div class="voice-role-targets">${directories || "<span class=\"voice-directory missing\">没有可安装的游戏目录</span>"}${missing}</div>
-      <div class="voice-role-count"><span>${role.overwriteCount} 覆盖</span><span>${role.newCount} 新增</span></div>
+      <div class="voice-role-count">${count}</div>
     </div>`;
   }).join("");
   const missingRoots = (info.roles || []).flatMap((role) => role.missingDirectories || []);
   const conflictText = (info.conflicts || []).length
     ? `<div class="voice-warning">已有语音包生效：${escapeHtml(info.conflicts.map((item) => item.modName || item.modId).join("、"))}。安装时可选择替换。</div>`
     : "";
-  voiceBody.innerHTML = `${conflictText}
+  const automaticNote = isAutomaticVoice
+    ? `<div class="voice-auto-note">这是标准 VPK 语音包，不需要执行“安装语音”。启用 VPK 后，游戏会直接从这个 VPK 加载语音。</div>`
+    : "";
+  voiceBody.innerHTML = `${automaticNote}${conflictText}
     <div class="voice-summary-grid">
       <div><span>覆盖文件</span><strong>${info.roles.reduce((sum, role) => sum + role.overwriteCount, 0)}</strong></div>
       <div><span>新增文件</span><strong>${info.roles.reduce((sum, role) => sum + role.newCount, 0)}</strong></div>
-      <div><span>安装目录</span><strong>${info.roles.reduce((sum, role) => sum + role.targetDirectories.length, 0)}</strong></div>
-      <div><span>缺失目录</span><strong>${missingRoots.length}</strong></div>
+      <div><span>${isAutomaticVoice ? "加载方式" : "安装目录"}</span><strong>${isAutomaticVoice ? "VPK 自动加载" : info.roles.reduce((sum, role) => sum + role.targetDirectories.length, 0)}</strong></div>
+      <div><span>${isAutomaticVoice ? "手动安装" : "缺失目录"}</span><strong>${isAutomaticVoice ? "不需要" : missingRoots.length}</strong></div>
     </div>
     <div class="voice-role-list">${roleRows || `<div class="vpk-files-empty">没有发现可识别的生还者语音角色</div>`}</div>`;
+  voiceInstall.classList.toggle("hidden", isAutomaticVoice);
+  voiceRestore.classList.toggle("hidden", isAutomaticVoice);
   voiceInstall.disabled = Boolean(info.installed) || !info.roles.some((role) => role.installable);
   voiceRestore.disabled = !info.installed;
   if (window.lucide) lucide.createIcons();
@@ -438,6 +714,8 @@ async function openVoiceReplacement(mod) {
   voiceTitle.textContent = `${mod.name} · 语音替换`;
   voiceSummary.textContent = "正在读取语音包…";
   voiceBody.innerHTML = `<div class="vpk-files-empty">正在读取语音角色和目标目录…</div>`;
+  voiceInstall.classList.remove("hidden");
+  voiceRestore.classList.remove("hidden");
   voiceInstall.disabled = true;
   voiceRestore.disabled = true;
   if (typeof voiceDialog.showModal === "function") voiceDialog.showModal();
@@ -507,24 +785,34 @@ async function handleVoiceAction(action) {
 
 async function handleNekoVpkTargetAction(event) {
   if (operationBusy) return;
-  const button = event.target.closest("button[data-action='convert-nekovpk']");
+  const button = event.target.closest("button[data-action='convert-nekovpk'], button[data-action='map-nekovpk']");
   if (!button || button.disabled) return;
   const mod = state.mods.find((item) => item.id === button.dataset.modId);
   if (!mod) return;
   const targetName = button.querySelector("strong")?.textContent || "目标角色";
-  return runExclusiveOperation(`正在切换到 ${targetName}，请稍候…`, async () => {
+  const experimental = button.dataset.action === "map-nekovpk";
+  if (experimental && !window.confirm(`将尝试把当前模型映射到“${targetName}”。这不会更改骨骼，可能出现姿势、材质或动画问题。确定继续吗？`)) return;
+  return runExclusiveOperation(`${experimental ? "正在尝试映射" : "正在切换到"} ${targetName}，请稍候…`, async () => {
     button.disabled = true;
     nekoVpkLoading.classList.remove("hidden");
+    nekoVpkLoading.querySelector(".operation-status span:last-child").textContent = `${experimental ? "正在尝试映射" : "正在切换到"} ${targetName}，请稍候…`;
     nekoVpkClose.disabled = true;
     nekoVpkTargetList.querySelectorAll("button").forEach((item) => { item.disabled = true; });
     try {
-      const result = await postJson("/api/mod/nekovpk/convert", {
+      const result = await postJson(experimental ? "/api/mod/nekovpk/map" : "/api/mod/nekovpk/convert", {
         id: mod.id,
         target: button.dataset.targetId,
       });
       await loadCatalog(true);
       nekoVpkDialog.close();
-      showNotice(result.result?.changed === false ? `当前已经是“${targetName}”` : `已切换到“${targetName}”`, true);
+      showNotice(
+        result.result?.changed === false
+          ? `当前已经是“${targetName}”`
+          : experimental
+            ? `已尝试映射到“${targetName}”，请进入游戏测试模型、材质和动画`
+            : `已切换到“${targetName}”`,
+        true,
+      );
     } catch (error) {
       showNotice(`角色切换失败：${error.message}`);
       nekoVpkTargetList.querySelectorAll("button").forEach((item) => {
@@ -687,6 +975,7 @@ function render() {
   renderStats();
   renderViewTitle();
   document.querySelector("#model-filters").classList.toggle("hidden", state.category !== "model");
+  document.querySelector("#role-filters").classList.toggle("hidden", state.category !== "survivor_target");
   grid.innerHTML = mods.length ? mods.map(renderCard).join("") : `<div class="empty">没有符合条件的 Mod</div>`;
   if (window.lucide) lucide.createIcons();
   document.querySelectorAll(".card-action, .vpk-line, .more-button, .tag-menu-item, .tag-menu-mark, .tag-menu-delete, .tag-menu-restore").forEach((button) => button.addEventListener("click", handleCardAction));
@@ -709,6 +998,523 @@ function showNotice(message, success = false) {
   if (window.lucide) lucide.createIcons();
 }
 
+function setSprayStatus(message, error = false) {
+  sprayStatus.textContent = message;
+  sprayStatus.classList.toggle("error", error);
+}
+
+function setSprayLoading(loading, message = "正在处理喷漆，请稍候…") {
+  sprayLoading.classList.toggle("hidden", !loading);
+  sprayLoadingMessage.textContent = message;
+  sprayClose.disabled = loading;
+  sprayImportButton.disabled = loading;
+  sprayApply.disabled = loading;
+}
+
+function renderSpraySlotUsage() {
+  const usedSlots = new Set(Object.keys(sprayAssignments).filter((slot) => standardSpraySlots.includes(slot)));
+  spraySlotSummary.textContent = `已使用 ${usedSlots.size}/16，剩余 ${16 - usedSlots.size} 个`;
+  spraySlotUsage.innerHTML = standardSpraySlots.map((slot) => {
+    const assetId = sprayAssignments[slot];
+    const asset = sprayAssets.find((item) => item.id === assetId);
+    return `<button class="spray-slot-state ${asset ? "used" : ""}" data-spray-slot="${slot}" type="button" title="${asset ? `定位到${escapeHtml(asset.modName)}的喷漆素材` : "空闲槽位"}">
+      <strong>槽位 ${slot}</strong><span>${asset ? escapeHtml(asset.modName) : "空闲"}</span>
+    </button>`;
+  }).join("");
+}
+
+function visibleSprayAssets() {
+  return sprayAssets.filter((asset) => (spraySourceTab === "imported" ? asset.sourceType === "imported" : asset.sourceType !== "imported"));
+}
+
+function sprayConfigModeLabel(mode) {
+  return { static: "静态", dynamic: "动态", gradient: "渐变" }[mode] || "未配置";
+}
+
+const sprayGradientLevels = [
+  { label: "近距离", size: 512 },
+  { label: "中近距离", size: 256 },
+  { label: "中距离", size: 128 },
+  { label: "中远距离", size: 64 },
+  { label: "远距离", size: 32 },
+];
+
+function defaultSprayGradientMipmaps(assetId) {
+  return sprayGradientLevels.map(({ size }) => ({ size, assetId, frame: 0 }));
+}
+
+function normalizedSprayGradientMipmaps(configuration, fallbackAssetId) {
+  const raw = Array.isArray(configuration?.mipmaps) && configuration.mipmaps.length
+    ? configuration.mipmaps
+    : Array.isArray(configuration?.keyframes) && configuration.keyframes.length
+      ? configuration.keyframes
+      : [];
+  return sprayGradientLevels.map(({ size }, index) => {
+    const item = raw[index] || raw[raw.length - 1] || {};
+    return {
+      size,
+      assetId: item.assetId || fallbackAssetId,
+      frame: Number.isInteger(item.frame) ? item.frame : 0,
+    };
+  });
+}
+
+function defaultSprayConfig(asset) {
+  return { mode: "static", frame: 0, source: "images", frames: [{ assetId: asset.id, frame: 0, durationMs: 100 }], mipmaps: defaultSprayGradientMipmaps(asset.id) };
+}
+
+function importedSprayAssets() {
+  return sprayAssets.filter((asset) => asset.sourceType === "imported");
+}
+
+function sprayPreviewUrl(assetId, frame = null) {
+  const asset = sprayAssets.find((item) => item.id === assetId);
+  if (!asset) return "";
+  return frame === null ? asset.preview : `${asset.preview}&frame=${encodeURIComponent(frame)}`;
+}
+
+function stopSprayConfigPreview() {
+  if (sprayConfigPreviewTimer !== null) {
+    window.clearTimeout(sprayConfigPreviewTimer);
+    sprayConfigPreviewTimer = null;
+  }
+}
+
+function renderSprayConfigPreview() {
+  const stage = sprayConfigBody.querySelector("#spray-config-preview-stage");
+  const caption = sprayConfigBody.querySelector("#spray-config-preview-caption");
+  if (!stage || !caption || !sprayConfigAsset) return;
+  stopSprayConfigPreview();
+  const configuration = collectSprayConfig();
+  const image = (assetId, frame = 0) => {
+    const source = sprayPreviewUrl(assetId, frame);
+    return source ? `<img class="spray-config-preview-image" src="${escapeHtml(source)}" alt="" />` : "";
+  };
+  if (configuration.mode === "static") {
+    stage.dataset.previewKind = "static";
+    stage.innerHTML = image(sprayConfigAsset.id, configuration.frame) || `<span>暂无可用预览</span>`;
+    caption.textContent = `静态 · 第 ${configuration.frame || 0} 帧`;
+    return;
+  }
+  if (configuration.mode === "dynamic" && configuration.source === "gif") {
+    const frameCount = Math.max(1, Math.min(16, Number(sprayConfigAsset.frameCount) || 1));
+    const duration = Math.max(20, Number(configuration.frameDurationMs) || 100);
+    stage.dataset.previewKind = "dynamic";
+    stage.innerHTML = Array.from({ length: frameCount }, (_, frame) => image(sprayConfigAsset.id, frame)).join("") || `<span>暂无可用预览</span>`;
+    const images = [...stage.querySelectorAll(".spray-config-preview-image")];
+    let index = 0;
+    const showNext = () => {
+      images.forEach((item, imageIndex) => item.classList.toggle("active", imageIndex === index));
+      index = (index + 1) % images.length;
+      sprayConfigPreviewTimer = window.setTimeout(showNext, duration);
+    };
+    if (images.length) showNext();
+    caption.textContent = `动态 · GIF ${frameCount} 帧 · 每帧 ${duration} 毫秒`;
+    return;
+  }
+  if (configuration.mode === "gradient") {
+    const levels = normalizedSprayGradientMipmaps(configuration, sprayConfigAsset.id);
+    const items = levels
+      .map((item, index) => ({ item, level: sprayGradientLevels[index], asset: sprayAssets.find((asset) => asset.id === item.assetId) }))
+      .filter(({ asset }) => asset);
+    stage.dataset.previewKind = "gradient";
+    if (!items.length) {
+      stage.innerHTML = `<span>请选择渐变图片</span>`;
+      caption.textContent = "渐变 · 尚未配置距离图片";
+      return;
+    }
+    stage.innerHTML = `<div class="spray-gradient-preview-grid">${items.map(({ item, level, asset }) => `
+      <div class="spray-gradient-preview-item">
+        <div class="spray-gradient-preview-frame">${image(asset.id, item.frame)}</div>
+        <span>${level.size}×${level.size}</span>
+      </div>`).join("")}</div>`;
+    caption.textContent = "渐变 · 游戏根据距离自动切换 5 级图片";
+    return;
+  }
+  const items = configuration.frames;
+  const assets = items.map((item) => ({ item, asset: sprayAssets.find((asset) => asset.id === item.assetId) })).filter(({ asset }) => asset);
+  if (!assets.length) {
+    stage.dataset.previewKind = configuration.mode;
+    stage.innerHTML = `<span>${configuration.mode === "gradient" ? "请选择至少两张关键帧" : "请选择至少一张图片"}</span>`;
+    caption.textContent = configuration.mode === "gradient" ? "渐变 · 尚未选择关键帧" : "动态 · 尚未选择图片";
+    return;
+  }
+  stage.dataset.previewKind = configuration.mode;
+  stage.innerHTML = assets.map(({ item, asset }) => image(asset.id, 0)).join("");
+  const images = [...stage.querySelectorAll(".spray-config-preview-image")];
+  let index = 0;
+  const showNext = () => {
+    images.forEach((item, imageIndex) => item.classList.toggle("active", imageIndex === index));
+    const duration = Math.max(20, Number(assets[index].item.durationMs) || 100);
+    index = (index + 1) % images.length;
+    sprayConfigPreviewTimer = window.setTimeout(showNext, duration);
+  };
+  showNext();
+  caption.textContent = configuration.mode === "gradient"
+    ? `渐变 · ${assets.length} 张关键帧 · 每帧 ${Math.max(20, Number(configuration.frameDurationMs) || 80)} 毫秒`
+    : `动态 · ${assets.length} 张图片 · 按各自时长播放`;
+}
+
+function renderSprayConfigEditor() {
+  if (!sprayConfigAsset || !sprayConfigDraft) return;
+  const mode = sprayConfigDraft.mode || "static";
+  const assets = importedSprayAssets();
+  const isGif = sprayConfigAsset.filename.toLowerCase().endsWith(".gif");
+  const selectedFrames = new Map((sprayConfigDraft.frames || []).map((item) => [item.assetId, item]));
+  const selectedMipmaps = normalizedSprayGradientMipmaps(sprayConfigDraft, sprayConfigAsset.id);
+  sprayConfigSummary.textContent = `${sprayConfigAsset.filename} · 原始文件保留不变`;
+  sprayConfigBody.innerHTML = `
+    <div class="spray-config-mode" role="tablist" aria-label="喷漆配置模式">
+      ${["static", "dynamic", "gradient"].map((item) => `<button class="spray-config-mode-button ${mode === item ? "active" : ""}" data-config-mode="${item}" type="button">${sprayConfigModeLabel(item)}</button>`).join("")}
+    </div>
+    <section class="spray-config-preview" aria-label="喷漆效果预览">
+      <div class="spray-config-preview-head"><strong>效果预览</strong><span id="spray-config-preview-caption"></span></div>
+      <div id="spray-config-preview-stage" class="spray-config-preview-stage" role="img" aria-label="当前喷漆效果预览"></div>
+    </section>
+    ${mode === "static" ? `
+      <section class="spray-config-section">
+        <div class="spray-config-section-head"><strong>静态画面</strong><span>普通图片只有第 0 帧</span></div>
+        <label class="spray-config-field">使用 GIF 的第几帧
+          <input id="spray-config-static-frame" class="settings-input" type="number" min="0" max="63" value="${Number.isInteger(sprayConfigDraft.frame) ? sprayConfigDraft.frame : 0}" ${isGif ? "" : "disabled"} />
+        </label>
+      </section>` : ""}
+    ${mode === "dynamic" ? `
+      <section class="spray-config-section">
+        <div class="spray-config-section-head"><strong>动态来源</strong><span>游戏内按统一帧速播放</span></div>
+        <div class="spray-config-source-tabs">
+          ${isGif ? `<label><input type="radio" name="spray-config-source" value="gif" ${sprayConfigDraft.source === "gif" ? "checked" : ""} />当前 GIF 全部帧</label>` : ""}
+          <label><input type="radio" name="spray-config-source" value="images" ${sprayConfigDraft.source !== "gif" ? "checked" : ""} />拼接多张导入图</label>
+        </div>
+        ${sprayConfigDraft.source === "gif" && isGif ? `
+          <label class="spray-config-field">每帧时长（毫秒）
+            <input id="spray-config-gif-duration" class="settings-input" type="number" min="20" max="5000" value="${sprayConfigDraft.frameDurationMs || 100}" />
+          </label>` : `
+          <div class="spray-config-image-list">
+            ${assets.map((asset) => {
+              const item = selectedFrames.get(asset.id);
+              return `<label class="spray-config-image-row"><input type="checkbox" data-config-frame-asset="${escapeHtml(asset.id)}" ${item ? "checked" : ""} /><img src="${asset.preview}" alt="" loading="lazy" /><span title="${escapeHtml(asset.filename)}">${escapeHtml(asset.filename)}</span><input class="settings-input spray-config-duration" data-config-duration="${escapeHtml(asset.id)}" type="number" min="20" max="5000" value="${item?.durationMs || 100}" ${item ? "" : "disabled"} /></label>`;
+            }).join("")}
+          </div>`}
+      </section>` : ""}
+    ${mode === "gradient" ? `
+      <section class="spray-config-section">
+        <div class="spray-config-section-head"><strong>距离图片</strong><span>游戏会按喷漆距离自动选择</span></div>
+        <div class="spray-gradient-mipmap-list">
+          ${sprayGradientLevels.map((level, index) => {
+            const selected = selectedMipmaps[index];
+            const selectedAsset = assets.find((asset) => asset.id === selected.assetId) || sprayConfigAsset;
+            return `<label class="spray-gradient-mipmap-row">
+              <span class="spray-gradient-mipmap-label"><strong>${level.label}</strong><small>${level.size}×${level.size}</small></span>
+              <span class="spray-gradient-mipmap-thumb"><img src="${selectedAsset.preview}" alt="" loading="lazy" /></span>
+              <select class="settings-input spray-gradient-mipmap-select" data-config-mipmap="${index}" aria-label="${level.label}使用的图片">
+                ${assets.map((asset) => `<option value="${escapeHtml(asset.id)}" ${asset.id === selected.assetId ? "selected" : ""}>${escapeHtml(asset.filename)}</option>`).join("")}
+              </select>
+            </label>`;
+          }).join("")}
+        </div>
+      </section>` : ""}
+    <p class="spray-config-note">保存配置后仍需点击“应用组合喷漆”才会写入游戏 VPK。</p>`;
+  renderSprayConfigPreview();
+  if (window.lucide) lucide.createIcons();
+}
+
+function collectSprayConfig() {
+  const mode = sprayConfigBody.querySelector("[data-config-mode].active")?.dataset.configMode || "static";
+  if (mode === "static") {
+    return { mode, frame: Number(sprayConfigBody.querySelector("#spray-config-static-frame")?.value || 0) };
+  }
+  if (mode === "dynamic") {
+    const source = sprayConfigBody.querySelector("input[name='spray-config-source']:checked")?.value || "images";
+    if (source === "gif") {
+      return { mode, source, assetId: sprayConfigAsset.id, frameDurationMs: Number(sprayConfigBody.querySelector("#spray-config-gif-duration")?.value || 100) };
+    }
+    return {
+      mode,
+      source,
+      frames: [...sprayConfigBody.querySelectorAll("input[data-config-frame-asset]:checked")].map((input) => ({
+        assetId: input.dataset.configFrameAsset,
+        frame: 0,
+        durationMs: Number(sprayConfigBody.querySelector(`[data-config-duration='${CSS.escape(input.dataset.configFrameAsset)}']`)?.value || 100),
+      })),
+    };
+  }
+  return {
+    mode,
+    mipmaps: [...sprayConfigBody.querySelectorAll("select[data-config-mipmap]")].map((select, index) => ({
+      size: sprayGradientLevels[index]?.size,
+      assetId: select.value,
+      frame: 0,
+    })),
+  };
+}
+
+function openSprayConfig(assetId) {
+  if (operationBusy) return;
+  const asset = sprayAssets.find((item) => item.id === assetId && item.sourceType === "imported");
+  if (!asset) return;
+  sprayConfigAsset = asset;
+  sprayConfigDraft = JSON.parse(JSON.stringify(asset.configuration || defaultSprayConfig(asset)));
+  renderSprayConfigEditor();
+  if (typeof sprayConfigDialog.showModal === "function") sprayConfigDialog.showModal();
+  else sprayConfigDialog.setAttribute("open", "");
+}
+
+async function saveSprayConfig() {
+  if (!sprayConfigAsset || operationBusy) return;
+  const configuration = collectSprayConfig();
+  return runExclusiveOperation("正在保存喷漆配置，请稍候…", async () => {
+    sprayConfigSave.disabled = true;
+    try {
+      const result = await postJson("/api/spray/config", { assetId: sprayConfigAsset.id, configuration });
+      const asset = sprayAssets.find((item) => item.id === sprayConfigAsset.id);
+      if (asset) asset.configuration = result.configuration;
+      renderSprayAssets();
+      sprayConfigDialog.close();
+      showNotice(`已保存“${sprayConfigAsset.filename}”的${sprayConfigModeLabel(result.configuration.mode)}配置`, true);
+    } catch (error) {
+      sprayConfigStatus.textContent = `保存失败：${error.message}`;
+      sprayConfigStatus.classList.add("error");
+    } finally {
+      sprayConfigSave.disabled = false;
+    }
+  });
+}
+
+function renderSprayAssets() {
+  const options = [
+    `<option value="">不应用</option>`,
+    ...standardSpraySlots.map((slot) => `<option value="${slot}">槽位 ${slot}</option>`),
+  ].join("");
+  renderSpraySlotUsage();
+  const assets = visibleSprayAssets();
+  if (!assets.length) {
+    sprayList.innerHTML = `<div class="spray-empty-drop"><i data-lucide="image-plus"></i><strong>${spraySourceTab === "imported" ? "还没有导入图片" : "没有检测到可预览的 Mod 喷漆素材"}</strong></div>`;
+    if (window.lucide) lucide.createIcons();
+    return;
+  }
+  sprayList.innerHTML = assets.map((asset) => {
+    const selectedSlot = Object.entries(sprayAssignments).find(([, assetId]) => assetId === asset.id)?.[0] || "";
+    const configuration = asset.configuration;
+    return `<article class="spray-asset">
+      <div class="spray-asset-image"><img src="${asset.preview}" data-spray-preview="true" alt="${escapeHtml(asset.modName)} 槽位 ${escapeHtml(asset.sourceSlot)}" loading="lazy" /></div>
+      <div class="spray-asset-info"><div class="spray-asset-info-head"><strong title="${escapeHtml(asset.modName)}">${escapeHtml(asset.modName)}</strong>${asset.sourceType === "imported" ? `<button class="spray-asset-config" data-spray-config="${escapeHtml(asset.id)}" type="button" title="配置导入喷漆" aria-label="配置 ${escapeHtml(asset.filename)}"><i data-lucide="settings-2"></i></button><button class="spray-asset-delete" data-spray-delete="${escapeHtml(asset.id)}" type="button" title="将导入图片移入回收站" aria-label="将 ${escapeHtml(asset.filename)} 移入回收站"><i data-lucide="trash-2"></i></button>` : ""}</div><span title="${escapeHtml(asset.vpkPath)}">${asset.sourceType === "imported" ? `导入图片 · ${escapeHtml(asset.filename)}${configuration ? ` · ${sprayConfigModeLabel(configuration.mode)}` : ""}` : `原槽位 ${escapeHtml(asset.sourceSlot)} · ${escapeHtml(asset.filename)}`}</span></div>
+      <select class="spray-asset-slot" data-spray-asset="${escapeHtml(asset.id)}" aria-label="为该喷漆选择目标槽位">${options.replace(`value="${selectedSlot}"`, `value="${selectedSlot}" selected`)}</select>
+    </article>`;
+  }).join("");
+  sprayPendingPreviews = 0;
+  setSprayStatus("预览按需加载，滚动到素材时读取图片。", false);
+  if (window.lucide) lucide.createIcons();
+}
+
+function setSpraySourceTab(source) {
+  spraySourceTab = source === "imported" ? "imported" : "mod";
+  sprayTabs.forEach((tab) => {
+    const active = tab.dataset.spraySource === spraySourceTab;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+  });
+  renderSprayAssets();
+}
+
+function focusSprayAsset(slot) {
+  const assetId = sprayAssignments[slot];
+  const asset = sprayAssets.find((item) => item.id === assetId);
+  if (!asset) return;
+  setSpraySourceTab(asset.sourceType === "imported" ? "imported" : "mod");
+  window.setTimeout(() => {
+    const card = [...sprayList.querySelectorAll("[data-spray-asset]")]
+      .find((item) => item.dataset.sprayAsset === asset.id);
+    if (!card) return;
+    card.scrollIntoView({ behavior: "smooth", block: "center" });
+    card.classList.add("spray-asset-focused");
+    window.setTimeout(() => card.classList.remove("spray-asset-focused"), 1400);
+  }, 0);
+}
+
+function updateSpraySummary() {
+  const modAssets = sprayAssets.filter((asset) => asset.sourceType !== "imported");
+  const importedAssets = sprayAssets.filter((asset) => asset.sourceType === "imported");
+  spraySummary.textContent = `共 ${sprayAssets.length} 张素材（Mod ${modAssets.length} 张，导入 ${importedAssets.length} 张）；可配置 16 个标准槽位`;
+}
+
+function handleSprayPreviewEvent(event) {
+  if (!event.target.matches("img[data-spray-preview]")) return;
+  sprayPendingPreviews = Math.max(0, sprayPendingPreviews - 1);
+  if (sprayPendingPreviews === 0) setSprayStatus("图片提取完成，请为素材指定目标槽位。", false);
+}
+
+async function openSprayManager() {
+  if (operationBusy) return;
+  const loadingMessage = sprayAssetsNeedRefresh
+    ? "正在提取喷漆图片，首次加载可能较慢…"
+    : "正在读取已缓存的喷漆素材…";
+  setSprayStatus(loadingMessage);
+  sprayList.innerHTML = `<div class="vpk-files-empty">${loadingMessage}</div>`;
+  if (typeof sprayDialog.showModal === "function") sprayDialog.showModal();
+  else sprayDialog.setAttribute("open", "");
+  try {
+    const route = sprayAssetsNeedRefresh ? "/api/spray/assets?refresh=1" : "/api/spray/assets";
+    const response = await fetch(route, { cache: "no-store" });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    sprayAssets = result.assets || [];
+    sprayAssignments = { ...(result.assignments || {}) };
+    const assetIds = new Set(sprayAssets.map((asset) => asset.id));
+    sprayAssignments = Object.fromEntries(Object.entries(sprayAssignments).filter(([slot, id]) => standardSpraySlots.includes(slot) && assetIds.has(id)));
+    sprayAssetsNeedRefresh = false;
+    updateSpraySummary();
+    setSpraySourceTab(spraySourceTab);
+  } catch (error) {
+    setSprayStatus(`读取喷漆失败：${error.message}`, true);
+    sprayList.innerHTML = `<div class="vpk-files-empty">喷漆素材读取失败</div>`;
+  }
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function importSprayImages(files) {
+  const selectedFiles = [...files];
+  if (!selectedFiles.length) return;
+  return runExclusiveOperation(`正在导入 ${selectedFiles.length} 张图片，请稍候…`, async () => {
+    setSprayLoading(true, `正在导入 ${selectedFiles.length} 张图片，请稍候…`);
+    try {
+      const images = [];
+      for (const file of selectedFiles) {
+        images.push({ name: file.name, data: arrayBufferToBase64(await file.arrayBuffer()) });
+      }
+      const result = await postJson("/api/spray/import", { images });
+      sprayAssetsNeedRefresh = true;
+      const response = await fetch("/api/spray/assets?refresh=1", { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      sprayAssets = payload.assets || [];
+      sprayAssetsNeedRefresh = false;
+      sprayAssignments = { ...(payload.assignments || {}) };
+      updateSpraySummary();
+      setSpraySourceTab("imported");
+      const details = [];
+      if (result.skipped?.length) details.push(`跳过 ${result.skipped.length} 张重复图片`);
+      showNotice(`已导入 ${result.imported?.length || 0} 张图片${details.length ? `，${details.join("，")}` : ""}`, true);
+    } catch (error) {
+      setSprayStatus(`导入图片失败：${error.message}`, true);
+      showNotice(`导入图片失败：${error.message}`);
+    } finally {
+      setSprayLoading(false);
+    }
+  });
+}
+
+function hasDraggedFiles(event) {
+  return [...(event.dataTransfer?.types || [])].includes("Files");
+}
+
+function setSprayDropActive(active) {
+  sprayDropOverlay.classList.toggle("hidden", !active);
+  sprayDialog.classList.toggle("spray-drop-active", active);
+}
+
+function handleSpraySelection(event) {
+  const select = event.target.closest(".spray-asset-slot");
+  if (!select) return;
+  const assetId = select.dataset.sprayAsset;
+  Object.keys(sprayAssignments).forEach((slot) => {
+    if (sprayAssignments[slot] === assetId) delete sprayAssignments[slot];
+  });
+  if (select.value) {
+    Object.keys(sprayAssignments).forEach((slot) => {
+      if (slot === select.value) delete sprayAssignments[slot];
+    });
+    sprayAssignments[select.value] = assetId;
+  }
+  renderSprayAssets();
+  setSprayStatus(`已选择 ${Object.keys(sprayAssignments).length} 个喷漆槽位。`);
+}
+
+async function deleteImportedSpray(assetId) {
+  if (operationBusy) return;
+  const asset = sprayAssets.find((item) => item.id === assetId && item.sourceType === "imported");
+  if (!asset) return;
+  if (!window.confirm(`确定将“${asset.filename}”移入回收站吗？\n如果它已配置到槽位，相关使用记录也会被清除。`)) return;
+  return runExclusiveOperation("正在删除导入喷漆，请稍候…", async () => {
+    setSprayLoading(true, "正在将导入喷漆移入回收站，请稍候…");
+    try {
+      const result = await postJson("/api/spray/delete", { assetId });
+      sprayAssets = sprayAssets.filter((item) => item.id !== assetId);
+      (result.clearedSlots || []).forEach((slot) => delete sprayAssignments[slot]);
+      updateSpraySummary();
+      renderSprayAssets();
+      const slotMessage = result.clearedSlots?.length ? `，已清除槽位 ${result.clearedSlots.join("、")}` : "";
+      showNotice(`已将“${asset.filename}”移入回收站${slotMessage}`, true);
+    } catch (error) {
+      setSprayStatus(`删除喷漆失败：${error.message}`, true);
+      showNotice(`删除喷漆失败：${error.message}`);
+    } finally {
+      setSprayLoading(false);
+    }
+  });
+}
+
+function handleSprayListClick(event) {
+  const configButton = event.target.closest("button[data-spray-config]");
+  if (configButton) {
+    openSprayConfig(configButton.dataset.sprayConfig);
+    return;
+  }
+  const button = event.target.closest("button[data-spray-delete]");
+  if (button) deleteImportedSpray(button.dataset.sprayDelete).catch((error) => showNotice(`删除喷漆失败：${error.message}`));
+}
+
+async function applySprayCollection() {
+  const count = Object.keys(sprayAssignments).length;
+  if (!count) {
+    setSprayStatus("请至少为一个槽位选择喷漆。", true);
+    return;
+  }
+  return runExclusiveOperation("正在生成组合喷漆，请稍候…", async () => {
+    setSprayLoading(true, "正在生成组合喷漆，请稍候…");
+    try {
+      const result = await postJson("/api/spray/apply", { assignments: sprayAssignments });
+      await loadCatalog();
+      sprayDialog.close();
+      const looseMessage = result.looseFilesMoved?.length
+        ? `，已备份并移出 ${result.looseFilesMoved.length} 个散装喷漆文件`
+        : "";
+      showNotice(`已生成组合喷漆，共配置 ${count} 个槽位；原始喷漆 Mod 已停用${looseMessage}`, true);
+    } catch (error) {
+      setSprayStatus(`应用喷漆失败：${error.message}`, true);
+      showNotice(`应用喷漆失败：${error.message}`);
+    } finally {
+      setSprayLoading(false);
+    }
+  });
+}
+
+async function resetSprayUsage() {
+  if (!window.confirm("确定清除最近一次保存的自定义喷漆配置吗？\n这不会删除或停用任何 VPK 文件。")) return;
+  return runExclusiveOperation("正在重置喷漆使用情况，请稍候…", async () => {
+    sprayReset.disabled = true;
+    try {
+      await postJson("/api/spray/reset", {});
+      sprayAssignments = {};
+      renderSprayAssets();
+      setSprayStatus("已清除最近一次保存的自定义喷漆配置。", false);
+      showNotice("已重置喷漆使用情况", true);
+    } catch (error) {
+      setSprayStatus(`重置喷漆失败：${error.message}`, true);
+    } finally {
+      sprayReset.disabled = false;
+    }
+  });
+}
+
 notice.addEventListener("click", (event) => {
   if (event.target.closest(".notice-close")) notice.classList.add("hidden");
 });
@@ -729,11 +1535,103 @@ async function postJson(route, payload) {
   return result;
 }
 
+function modelTargetKey(target) {
+  return `${target.side || ""}:${target.id || ""}`;
+}
+
+function modelTargetLabel(target) {
+  const side = target.side === "survivor" ? "幸存者" : "感染者";
+  return `${side} · ${target.name}`;
+}
+
+function refreshModelConflictState() {
+  const groups = new Map();
+  const enabledMods = state.mods.filter((mod) => mod.enabled !== false && mod.vpkFiles?.length);
+  for (const mod of enabledMods) {
+    const seenTargets = new Set();
+    for (const target of getModelTargets(mod)) {
+      const key = modelTargetKey(target);
+      if (seenTargets.has(key)) continue;
+      seenTargets.add(key);
+      if (!groups.has(key)) groups.set(key, { target, mods: [] });
+      groups.get(key).mods.push(mod);
+    }
+  }
+
+  state.mods.forEach((mod) => { mod.modelConflicts = []; });
+  for (const group of groups.values()) {
+    if (group.mods.length < 2) continue;
+    for (const mod of group.mods) {
+      mod.modelConflicts.push({
+        target: group.target,
+        otherMods: group.mods.filter((candidate) => candidate.id !== mod.id).map((candidate) => candidate.name),
+      });
+    }
+  }
+}
+
+function getModelTargets(mod) {
+  return (mod.characterTargets || []).filter((target) => target.side && target.id);
+}
+
+function findEnableConflicts(modsToEnable) {
+  const selectedIds = new Set(modsToEnable.map((mod) => mod.id));
+  const conflicts = [];
+  const seen = new Set();
+  const addConflict = (target, first, second, reason) => {
+    const pair = [first.id, second.id].sort().join("|");
+    const key = `${pair}:${modelTargetKey(target)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    conflicts.push({ target, first, second, reason });
+  };
+
+  for (const mod of modsToEnable) {
+    for (const target of getModelTargets(mod)) {
+      for (const other of state.mods) {
+        if (other.id === mod.id || selectedIds.has(other.id) || other.enabled === false || !other.vpkFiles?.length) continue;
+        if (getModelTargets(other).some((candidate) => modelTargetKey(candidate) === modelTargetKey(target))) {
+          addConflict(target, mod, other, "已有启用的 Mod");
+        }
+      }
+    }
+  }
+
+  for (let index = 0; index < modsToEnable.length; index += 1) {
+    for (let next = index + 1; next < modsToEnable.length; next += 1) {
+      const first = modsToEnable[index];
+      const second = modsToEnable[next];
+      for (const target of getModelTargets(first)) {
+        if (getModelTargets(second).some((candidate) => modelTargetKey(candidate) === modelTargetKey(target))) {
+          addConflict(target, first, second, "本次将同时启用");
+        }
+      }
+    }
+  }
+  return conflicts;
+}
+
+function confirmEnableConflicts(modsToEnable) {
+  const conflicts = findEnableConflicts(modsToEnable);
+  if (!conflicts.length) return true;
+  const lines = conflicts.slice(0, 8).map(({ target, first, second, reason }) =>
+    `- ${modelTargetLabel(target)}：${first.name} / ${second.name}（${reason}）`
+  );
+  const extra = conflicts.length > lines.length ? `\n另有 ${conflicts.length - lines.length} 个重复目标未展开。` : "";
+  return window.confirm(
+    `检测到启用后可能发生模型覆盖：\n${lines.join("\n")}${extra}\n\n后启用的 Mod 可能覆盖前一个 Mod 的模型。仍要继续吗？`
+  );
+}
+
 async function runBulkAction(action) {
   if (operationBusy) return;
   const ids = [...state.selectedIds];
   if (!ids.length) return;
   if (action === "delete" && !window.confirm(`确定将选中的 ${ids.length} 个 Mod 移入回收站吗？\n之后可从系统回收站恢复。`)) return;
+  if (action === "enable") {
+    const modsToEnable = state.mods.filter((mod) => ids.includes(mod.id) && mod.enabled === false);
+    if (!confirmEnableConflicts(modsToEnable)) return;
+  }
   const actionLabel = action === "delete" ? "移入回收站" : action === "enable" ? "启用" : "停用";
   return runExclusiveOperation(`正在批量${actionLabel}，请稍候…`, async () => {
     const result = await postJson("/api/mod/bulk", {
@@ -1033,6 +1931,7 @@ async function handleCardActionInner(button) {
       showNotice("标签已恢复", true);
     } else if (button.dataset.action === "toggle-enabled") {
       const enabled = mod.enabled === false;
+      if (enabled && !confirmEnableConflicts([mod])) return;
       await postJson("/api/mod/toggle", { id: mod.id, enabled });
       await loadCatalog(true);
       showNotice(enabled ? `已启用“${mod.name}”` : `已停用“${mod.name}”`, true);
@@ -1087,6 +1986,8 @@ async function loadCatalog(force = false) {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
     state.mods = payload.mods || [];
+    sprayAssetsNeedRefresh = true;
+    refreshModelConflictState();
     rootPath.textContent = payload.root || "当前工作目录";
     renderStats();
     render();
@@ -1173,6 +2074,100 @@ async function importArchive(file) {
   }
 }
 
+function renderWorkshopSelectionState() {
+  const selectedCount = workshopSelectedIds.size;
+  const loading = !workshopLoading.classList.contains("hidden");
+  workshopSelectedCount.textContent = `已选择 ${selectedCount} 个`;
+  workshopSelectAll.checked = workshopMods.length > 0 && selectedCount === workshopMods.length;
+  workshopSelectAll.indeterminate = selectedCount > 0 && selectedCount < workshopMods.length;
+  workshopCopy.disabled = loading || selectedCount === 0;
+}
+
+function setWorkshopLoading(loading, message = "正在处理 Workshop Mod，请稍候…") {
+  workshopLoadingMessage.textContent = message;
+  workshopLoading.classList.toggle("hidden", !loading);
+  workshopClose.disabled = loading;
+  workshopSelectAll.disabled = loading;
+  workshopList.querySelectorAll("input[data-workshop-id]").forEach((input) => {
+    input.disabled = loading;
+  });
+  renderWorkshopSelectionState();
+}
+
+function renderWorkshopDialog() {
+  workshopSummary.textContent = workshopMods.length
+    ? `发现 ${workshopMods.length} 个尚未复制到工作区的 Mod`
+    : "没有发现新的 Workshop Mod";
+  workshopList.innerHTML = workshopMods.length
+    ? workshopMods.map((mod) => {
+      const preview = mod.files.find((file) => file.kind === "preview");
+      const fileNames = mod.files.map((file) => file.name).join("、");
+      return `<article class="workshop-item">
+        <label class="workshop-select" title="选择 ${escapeHtml(mod.name)}"><input type="checkbox" data-workshop-id="${escapeHtml(mod.id)}" ${workshopSelectedIds.has(mod.id) ? "checked" : ""} /><span class="sr-only">选择 ${escapeHtml(mod.name)}</span></label>
+        <div class="workshop-preview ${preview ? "" : "empty"}">${preview ? `<img src="${fileUrl(preview.path)}" alt="${escapeHtml(mod.name)} 预览图" loading="lazy" />` : `<i data-lucide="package"></i>`}</div>
+        <div class="workshop-info"><h3 title="${escapeHtml(mod.name)}">${escapeHtml(mod.name)}</h3><p title="${escapeHtml(fileNames)}">${escapeHtml(fileNames)}</p><span>${mod.files.length} 个文件 · 复制到工作区根目录</span></div>
+      </article>`;
+    }).join("")
+    : `<div class="workshop-empty">当前 Workshop 中没有待复制的 VPK。</div>`;
+  renderWorkshopSelectionState();
+  if (window.lucide) lucide.createIcons();
+}
+
+async function openWorkshopDialog() {
+  if (operationBusy) return;
+  try {
+    const result = await runExclusiveOperation("正在扫描 Workshop，请稍候…", async () => {
+      const response = await fetch("/api/workshop/scan", { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      return payload;
+    });
+    if (!result) return;
+    workshopMods = result.mods || [];
+    workshopSelectedIds = new Set(workshopMods.map((mod) => mod.id));
+    workshopStatus.textContent = result.available ? `来源：${result.path}` : "当前工作区没有 workshop 子目录";
+    renderWorkshopDialog();
+    if (typeof workshopDialog.showModal === "function") workshopDialog.showModal();
+    else workshopDialog.setAttribute("open", "");
+  } catch (error) {
+    showNotice(`Workshop 扫描失败：${error.message}`);
+  }
+}
+
+async function copySelectedWorkshopMods() {
+  if (operationBusy) return;
+  const ids = [...workshopSelectedIds];
+  if (!ids.length) return;
+  setWorkshopLoading(true, `正在复制 ${ids.length} 个 Workshop Mod，请稍候…`);
+  try {
+    const result = await runExclusiveOperation(`正在复制 ${ids.length} 个 Workshop Mod，请稍候…`, async () => {
+      const response = await fetch("/api/workshop/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      await loadCatalog(true);
+      return payload;
+    });
+    if (!result) return;
+    workshopDialog.close();
+    workshopMods = [];
+    workshopSelectedIds = new Set();
+    const details = [];
+    if (result.skipped?.length) details.push(`跳过 ${result.skipped.length} 个同内容文件`);
+    if (result.conflicts?.length) details.push(`冲突 ${result.conflicts.length} 个文件`);
+    if (result.missing?.length) details.push(`缺少 ${result.missing.length} 个文件`);
+    showNotice(`已复制 ${result.imported?.length || 0} 个文件到工作区${details.length ? `，${details.join("，")}` : ""}`, true);
+  } catch (error) {
+    workshopStatus.textContent = `复制失败：${error.message}`;
+    workshopStatus.classList.add("error");
+  } finally {
+    setWorkshopLoading(false);
+  }
+}
+
 function refreshCatalog() {
   if (operationBusy) return;
   return runExclusiveOperation("正在刷新目录，请稍候…", () => loadCatalog(true));
@@ -1210,6 +2205,15 @@ document.querySelectorAll(".sub-filter").forEach((button) => button.addEventList
   state.modelFilter = button.dataset.modelCategory;
   render();
 }));
+document.querySelectorAll(".role-filter").forEach((button) => button.addEventListener("click", () => {
+  if (operationBusy) return;
+  document.querySelectorAll(".role-filter").forEach((item) => item.classList.remove("active"));
+  button.classList.add("active");
+  state.category = "survivor_target";
+  state.roleSide = button.dataset.roleSide;
+  document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.category === "survivor_target"));
+  render();
+}));
 document.querySelectorAll("[data-bulk-action]").forEach((button) => button.addEventListener("click", () => {
   runBulkAction(button.dataset.bulkAction).catch((error) => showNotice(`批量操作失败：${error.message}`));
 }));
@@ -1235,7 +2239,7 @@ aiRunButton.addEventListener("click", () => runExclusiveOperation("正在进行 
 aiSavePromptButton.addEventListener("click", () => runExclusiveOperation("正在保存提示词，请稍候…", saveCurrentPrompt));
 aiDeletePromptButton.addEventListener("click", () => runExclusiveOperation("正在删除提示词，请稍候…", deleteCurrentPrompt));
 document.querySelector("#ai-settings-nav").addEventListener("click", openAiSettings);
-document.querySelector("#settings-button").addEventListener("click", openAiSettings);
+sidebarToggleButton.addEventListener("click", toggleSidebar);
 document.querySelector("#ai-settings-close").addEventListener("click", closeAiSettings);
 document.querySelector("#ai-settings-save").addEventListener("click", () => runExclusiveOperation("正在保存 AI 设置，请稍候…", saveAiSettings));
 document.querySelector("#ai-settings-clear").addEventListener("click", () => runExclusiveOperation("正在清除 API Key，请稍候…", clearAiKey));
@@ -1243,6 +2247,8 @@ document.querySelector("#refresh-button").addEventListener("click", refreshCatal
 document.querySelector("#change-folder-button").addEventListener("click", changeFolder);
 document.querySelector("#reset-folder-button").addEventListener("click", resetFolder);
 document.querySelector("#refresh-button-top").addEventListener("click", refreshCatalog);
+document.querySelector("#spray-manager-button").addEventListener("click", openSprayManager);
+document.querySelector("#workshop-button").addEventListener("click", openWorkshopDialog);
 document.querySelector("#import-button").addEventListener("click", () => document.querySelector("#import-input").click());
 document.querySelector("#import-input").addEventListener("change", (event) => {
   const [file] = event.target.files;
@@ -1257,6 +2263,27 @@ document.addEventListener("click", (event) => {
 importPreviewList.addEventListener("click", handleImportPreviewAction);
 importPreviewClose.addEventListener("click", () => importPreviewDialog.close());
 document.querySelector("#import-preview-done").addEventListener("click", () => importPreviewDialog.close());
+document.querySelector("#workshop-close").addEventListener("click", () => workshopDialog.close());
+workshopCopy.addEventListener("click", copySelectedWorkshopMods);
+workshopSelectAll.addEventListener("change", () => {
+  workshopSelectedIds = workshopSelectAll.checked
+    ? new Set(workshopMods.map((mod) => mod.id))
+    : new Set();
+  workshopList.querySelectorAll("input[data-workshop-id]").forEach((input) => {
+    input.checked = workshopSelectedIds.has(input.dataset.workshopId);
+  });
+  renderWorkshopSelectionState();
+});
+workshopList.addEventListener("change", (event) => {
+  const input = event.target.closest("input[data-workshop-id]");
+  if (!input) return;
+  if (input.checked) workshopSelectedIds.add(input.dataset.workshopId);
+  else workshopSelectedIds.delete(input.dataset.workshopId);
+  renderWorkshopSelectionState();
+});
+workshopDialog.addEventListener("click", (event) => {
+  if (event.target === workshopDialog) workshopDialog.close();
+});
 vpkFilesList.addEventListener("click", handleVpkFileAction);
 vpkFilesClose.addEventListener("click", () => vpkFilesDialog.close());
 vpkFilesDialog.addEventListener("click", (event) => {
@@ -1264,6 +2291,101 @@ vpkFilesDialog.addEventListener("click", (event) => {
 });
 vpkFilesDialog.addEventListener("close", () => {
   delete vpkFilesDialog.dataset.modId;
+});
+sprayList.addEventListener("change", handleSpraySelection);
+sprayList.addEventListener("click", handleSprayListClick);
+sprayList.addEventListener("load", handleSprayPreviewEvent, true);
+sprayList.addEventListener("error", handleSprayPreviewEvent, true);
+sprayConfigBody.addEventListener("click", (event) => {
+  const modeButton = event.target.closest("button[data-config-mode]");
+  if (!modeButton) return;
+  sprayConfigDraft = { ...sprayConfigDraft, ...collectSprayConfig(), mode: modeButton.dataset.configMode };
+  if (sprayConfigDraft.mode === "dynamic" && !sprayConfigDraft.source) sprayConfigDraft.source = "images";
+  renderSprayConfigEditor();
+});
+sprayConfigBody.addEventListener("change", (event) => {
+  if (event.target.matches("input[name='spray-config-source']")) {
+    sprayConfigDraft = { ...sprayConfigDraft, ...collectSprayConfig(), source: event.target.value };
+    renderSprayConfigEditor();
+    return;
+  }
+  const mipmapSelect = event.target.closest("select[data-config-mipmap]");
+  if (mipmapSelect) {
+    sprayConfigDraft = { ...sprayConfigDraft, ...collectSprayConfig() };
+    renderSprayConfigEditor();
+    return;
+  }
+  const frameInput = event.target.closest("input[data-config-frame-asset]");
+  if (frameInput) {
+    const duration = sprayConfigBody.querySelector(`[data-config-duration='${CSS.escape(frameInput.dataset.configFrameAsset)}']`);
+    if (duration) duration.disabled = !frameInput.checked;
+  }
+  renderSprayConfigPreview();
+});
+sprayConfigBody.addEventListener("input", () => renderSprayConfigPreview());
+spraySlotUsage.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-spray-slot]");
+  if (button) focusSprayAsset(button.dataset.spraySlot);
+});
+sprayTabs.forEach((tab) => tab.addEventListener("click", () => setSpraySourceTab(tab.dataset.spraySource)));
+sprayImportButton.addEventListener("click", () => sprayImportInput.click());
+sprayImportInput.addEventListener("change", (event) => {
+  importSprayImages(event.target.files).catch((error) => showNotice(`导入图片失败：${error.message}`));
+  event.target.value = "";
+});
+sprayDialog.addEventListener("dragenter", (event) => {
+  if (!hasDraggedFiles(event) || operationBusy) return;
+  event.preventDefault();
+  sprayDragDepth += 1;
+  setSprayDropActive(true);
+});
+sprayDialog.addEventListener("dragover", (event) => {
+  if (!hasDraggedFiles(event) || operationBusy) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "copy";
+  setSprayDropActive(true);
+});
+sprayDialog.addEventListener("dragleave", (event) => {
+  if (!hasDraggedFiles(event)) return;
+  sprayDragDepth = Math.max(0, sprayDragDepth - 1);
+  if (!sprayDialog.contains(event.relatedTarget)) {
+    sprayDragDepth = 0;
+    setSprayDropActive(false);
+  }
+});
+sprayDialog.addEventListener("drop", (event) => {
+  if (!hasDraggedFiles(event) || operationBusy) return;
+  event.preventDefault();
+  sprayDragDepth = 0;
+  setSprayDropActive(false);
+  importSprayImages(event.dataTransfer.files).catch((error) => showNotice(`导入图片失败：${error.message}`));
+});
+sprayApply.addEventListener("click", applySprayCollection);
+sprayReset.addEventListener("click", resetSprayUsage);
+sprayClose.addEventListener("click", () => sprayDialog.close());
+sprayDialog.addEventListener("click", (event) => {
+  if (event.target === sprayDialog && !operationBusy) sprayDialog.close();
+});
+sprayDialog.addEventListener("close", () => {
+  sprayDragDepth = 0;
+  setSprayDropActive(false);
+  setSprayLoading(false);
+});
+sprayConfigSave.addEventListener("click", () => saveSprayConfig().catch((error) => {
+  sprayConfigStatus.textContent = `保存失败：${error.message}`;
+  sprayConfigStatus.classList.add("error");
+}));
+sprayConfigCancel.addEventListener("click", () => sprayConfigDialog.close());
+sprayConfigClose.addEventListener("click", () => sprayConfigDialog.close());
+sprayConfigDialog.addEventListener("click", (event) => {
+  if (event.target === sprayConfigDialog && !operationBusy) sprayConfigDialog.close();
+});
+sprayConfigDialog.addEventListener("close", () => {
+  stopSprayConfigPreview();
+  sprayConfigAsset = null;
+  sprayConfigDraft = null;
+  sprayConfigStatus.textContent = "";
+  sprayConfigStatus.classList.remove("error");
 });
 nekoVpkTargetList.addEventListener("click", handleNekoVpkTargetAction);
 nekoVpkClose.addEventListener("click", () => nekoVpkDialog.close());
@@ -1295,6 +2417,9 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+restoreSidebarState();
+restoreNavOrder();
+initializeNavDragging();
 if (window.lucide) lucide.createIcons();
 loadCatalog();
 checkForSourceChanges();

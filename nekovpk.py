@@ -1,8 +1,7 @@
-"""Local NekoVPK inspection and survivor-target conversion helpers.
+"""Local survivor-target conversion helpers.
 
-This module is intentionally separate from the normal VPK catalog and mutation
-paths.  It only activates for archives containing a ``nekovpk/*.neko7z``
-member.
+NekoVPK-specific inspection remains separate from the normal VPK catalog, while
+the path-level survivor mapping helpers can also be used for ordinary VPKs.
 """
 
 from __future__ import annotations
@@ -129,6 +128,21 @@ SURVIVOR_TARGETS = (
 )
 TARGET_BY_ID = {target["id"]: target for target in SURVIVOR_TARGETS}
 
+# These names are the path-level identifiers used by the stock survivor assets.
+# Mapping preserves model bytes and only rewrites paths that belong to the
+# selected survivor family.
+SURVIVOR_PATH_TOKENS = {
+    "bill": {"model": "namvet", "arms": "bill"},
+    "zoey": {"model": "teenangst", "arms": "zoey"},
+    "louis": {"model": "manager", "arms": "louis"},
+    "francis": {"model": "biker", "arms": "francis"},
+    "nick": {"model": "gambler", "arms": "gambler_new"},
+    "coach": {"model": "coach", "arms": "coach_new"},
+    "ellis": {"model": "mechanic", "arms": "mechanic_new"},
+    "rochelle": {"model": "producer", "arms": "producer_new"},
+}
+MODEL_COMPONENT_EXTENSIONS = ("mdl", "vvd", "dx90.vtx")
+
 
 class NekoVPKError(ValueError):
     """Raised when a NekoVPK archive cannot be safely inspected or changed."""
@@ -241,6 +255,105 @@ def _has_required_model_set(paths: set[str], target: dict) -> bool:
     return model and arms
 
 
+def _model_component_paths(paths: set[str], target: dict) -> tuple[set[str], set[str]]:
+    """Return the primary body and first-person arm files for one target."""
+
+    tokens = SURVIVOR_PATH_TOKENS[target["id"]]
+    model_prefix = f"models/survivors/survivor_{tokens['model']}."
+    arms_prefix = f"models/weapons/arms/v_arms_{tokens['arms']}."
+    model_paths = {path for path in paths if path.startswith(model_prefix)}
+    arm_paths = {path for path in paths if path.startswith(arms_prefix)}
+    return model_paths, arm_paths
+
+
+def _has_complete_model_set(paths: set[str], target: dict) -> bool:
+    model_paths, arm_paths = _model_component_paths(paths, target)
+    tokens = SURVIVOR_PATH_TOKENS[target["id"]]
+    model_prefix = f"models/survivors/survivor_{tokens['model']}."
+    arms_prefix = f"models/weapons/arms/v_arms_{tokens['arms']}."
+    model_extensions = {path.removeprefix(model_prefix) for path in model_paths}
+    arm_extensions = {path.removeprefix(arms_prefix) for path in arm_paths}
+    return all(
+        extension in model_extensions and extension in arm_extensions
+        for extension in MODEL_COMPONENT_EXTENSIONS
+    )
+
+
+def _map_survivor_path(relative: str, source: dict, target: dict) -> str | None:
+    """Map one known survivor asset path while rejecting unrelated files."""
+
+    source_tokens = SURVIVOR_PATH_TOKENS[source["id"]]
+    target_tokens = SURVIVOR_PATH_TOKENS[target["id"]]
+    replacements = (
+        (
+            f"models/survivors/survivor_{source_tokens['model']}",
+            f"models/survivors/survivor_{target_tokens['model']}",
+        ),
+        (
+            f"models/weapons/arms/v_arms_{source_tokens['arms']}",
+            f"models/weapons/arms/v_arms_{target_tokens['arms']}",
+        ),
+        (
+            f"materials/vgui/s_panel_{source_tokens['model']}",
+            f"materials/vgui/s_panel_{target_tokens['model']}",
+        ),
+        (
+            f"materials/vgui/select_{source['id']}",
+            f"materials/vgui/select_{target['id']}",
+        ),
+        (
+            f"models/survivors/{source_tokens['model']}/{source_tokens['model']}_deathpose",
+            f"models/survivors/{target_tokens['model']}/{target_tokens['model']}_deathpose",
+        ),
+    )
+    for old, new in replacements:
+        if old in relative:
+            candidate = relative.replace(old, new, 1)
+            if _target_matches(candidate, target):
+                return candidate
+    return None
+
+
+def _inspect_survivor_mapping(paths: set[str], source: dict) -> dict:
+    """Describe experimental path mappings from the current outer VPK."""
+
+    targets: list[dict] = []
+    source_paths = _target_file_paths(paths, source)
+    complete = _has_complete_model_set(paths, source)
+    for target in SURVIVOR_TARGETS:
+        if target["id"] == source["id"]:
+            continue
+        mapped: dict[str, str] = {}
+        for relative in source_paths:
+            destination = _map_survivor_path(relative, source, target)
+            if destination:
+                mapped[relative] = destination
+        mapped_paths = set(mapped.values())
+        target_complete = _has_complete_model_set(mapped_paths, target)
+        warnings = [
+            "实验性路径映射，仅改文件路径，不改模型骨骼或动画数据",
+            "模型骨骼兼容性未验证，进入游戏后需要实际测试",
+        ]
+        if not complete:
+            warnings.insert(0, "当前角色缺少完整的模型三件套或手臂模型三件套")
+        elif not target_complete:
+            warnings.insert(0, f"无法为 {target['name']} 生成完整的模型和手臂文件组")
+        targets.append(
+            {
+                "id": target["id"],
+                "name": target["name"],
+                "fileCount": len(mapped),
+                "ready": complete and target_complete and bool(mapped),
+                "warnings": warnings,
+            }
+        )
+    return {
+        "source": source["id"],
+        "sourceName": source["name"],
+        "sourceFileCount": len(source_paths),
+        "targets": targets,
+    }
+
 def _target_summary(target: dict, paths: set[str], *, source: str) -> dict:
     files = _target_file_paths(paths, target)
     return {
@@ -289,13 +402,20 @@ def inspect_nekovpk(vpk_path: str | Path) -> dict:
             elif target["id"] in backup_targets:
                 available[target["id"]] = _target_summary(target, backup_paths, source="备份")
         current = next(iter(current_targets), None)
+        mapping = (
+            _inspect_survivor_mapping(outer_paths, TARGET_BY_ID[current])
+            if current
+            else {"source": None, "sourceName": None, "sourceFileCount": 0, "targets": []}
+        )
         return {
             "format": "nekovpk",
             "nestedPath": nested_path,
             "currentTarget": current,
+            "currentTargets": list(current_targets),
             "currentName": TARGET_BY_ID[current]["name"] if current else None,
             "targets": [available[target["id"]] for target in SURVIVOR_TARGETS if target["id"] in available],
             "innerFileCount": len(inner_paths),
+            "mapping": mapping,
         }
 
 
@@ -494,3 +614,73 @@ def convert_nekovpk_target(vpk_path: str | Path, target_id: str) -> dict:
                 pass
 
     return {"changed": True, "target": target_id, "targetName": target["name"], "backup": str(backup)}
+
+
+def map_nekovpk_target(vpk_path: str | Path, target_id: str) -> dict:
+    """Experimentally map the current outer survivor assets to another role."""
+
+    path = Path(vpk_path)
+    target_id = str(target_id).strip().casefold()
+    if target_id not in TARGET_BY_ID:
+        raise NekoVPKError("不支持的生还者角色")
+
+    info = inspect_nekovpk(path)
+    source_id = info.get("currentTarget")
+    if not source_id or source_id not in TARGET_BY_ID:
+        raise NekoVPKError("无法确定当前 VPK 的生还者角色")
+    if len(info.get("currentTargets", [source_id])) != 1:
+        raise NekoVPKError("当前 VPK 同时包含多个生还者角色，无法安全判断映射源")
+    if source_id == target_id:
+        return {"changed": False, "source": source_id, "target": target_id, "backup": None}
+
+    target = TARGET_BY_ID[target_id]
+    mapping_info = info.get("mapping", {})
+    mapping_target = next(
+        (item for item in mapping_info.get("targets", []) if item.get("id") == target_id),
+        None,
+    )
+    if not mapping_target or mapping_target.get("ready") is not True:
+        warnings = (mapping_target or {}).get("warnings", [])
+        detail = warnings[0] if warnings else f"无法生成完整的 {target['name']} 文件组"
+        raise NekoVPKError(f"不能尝试映射到 {target['name']}：{detail}")
+
+    source = TARGET_BY_ID[source_id]
+    entries = read_vpk_entries(path)
+    source_paths = _target_file_paths(set(entries), source)
+    mapped_entries: dict[str, bytes] = {}
+    for relative in source_paths:
+        destination = _map_survivor_path(relative, source, target)
+        if destination:
+            mapped_entries[destination] = entries[relative]
+    if not _has_complete_model_set(set(mapped_entries), target):
+        raise NekoVPKError(f"不能为 {target['name']} 生成完整的模型和手臂文件组")
+
+    backup = _backup_path(path)
+    if not backup.exists():
+        shutil.copy2(path, backup)
+
+    for relative in list(entries):
+        if any(_target_matches(relative, candidate) for candidate in SURVIVOR_TARGETS):
+            del entries[relative]
+    entries.update(mapped_entries)
+
+    temp_output = path.with_name(f".{path.name}.nekovpk-map-{uuid.uuid4().hex}.tmp")
+    try:
+        write_vpk_entries(temp_output, entries)
+        os.replace(temp_output, path)
+    finally:
+        try:
+            temp_output.unlink()
+        except FileNotFoundError:
+            pass
+
+    return {
+        "changed": True,
+        "source": source_id,
+        "sourceName": source["name"],
+        "target": target_id,
+        "targetName": target["name"],
+        "fileCount": len(mapped_entries),
+        "experimental": True,
+        "backup": str(backup),
+    }

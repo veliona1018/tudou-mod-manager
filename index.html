@@ -3,28 +3,29 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>L4D2 Mod 管理器</title>
+    <title>土豆 Mod 管理器</title>
+    <link rel="icon" type="image/png" href="assets/tudou-logo.png" />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <main class="shell">
       <aside class="sidebar">
         <div class="brand">
-          <div class="brand-mark">L4</div>
+          <div class="brand-mark"><img src="assets/tudou-logo.png" alt="土豆" /></div>
           <div>
-            <strong>Mod 管理器</strong>
-            <span>LOCAL LIBRARY</span>
+            <strong>土豆 Mod 管理器</strong>
           </div>
         </div>
 
         <nav class="nav" aria-label="主导航">
-          <button class="nav-item active" data-category="all" type="button"><i data-lucide="layout-grid"></i>Mod 库</button>
-          <button class="nav-item" data-category="map" type="button"><i data-lucide="map"></i>地图</button>
-          <button class="nav-item" data-category="model" type="button"><i data-lucide="scan-face"></i>模型</button>
-          <button class="nav-item" data-category="survivor_target" type="button"><i data-lucide="arrow-left-right"></i>角色调整</button>
-          <button class="nav-item" data-category="voice_replacement" type="button"><i data-lucide="audio-lines"></i>语音替换</button>
-          <button class="nav-item" data-category="spray" type="button"><i data-lucide="image"></i>喷漆</button>
-          <button id="ai-settings-nav" class="nav-item" type="button"><i data-lucide="brain-circuit"></i>AI 设置</button>
+          <button class="nav-item nav-pinned active" data-nav-id="library" data-category="all" draggable="false" type="button"><i data-lucide="layout-grid"></i>Mod 库</button>
+          <button class="nav-item" data-nav-id="map" data-category="map" draggable="true" type="button"><i data-lucide="map"></i>地图</button>
+          <button class="nav-item" data-nav-id="archive" data-category="archive" draggable="true" type="button"><i data-lucide="archive"></i>压缩包</button>
+          <button class="nav-item" data-nav-id="model" data-category="model" draggable="true" type="button"><i data-lucide="scan-face"></i>模型</button>
+          <button class="nav-item" data-nav-id="survivor-target" data-category="survivor_target" draggable="true" type="button"><i data-lucide="arrow-left-right"></i>角色调整</button>
+          <button class="nav-item" data-nav-id="voice" data-category="voice_replacement" draggable="true" type="button"><i data-lucide="audio-lines"></i>语音替换</button>
+          <button class="nav-item" data-nav-id="spray" data-category="spray" draggable="true" type="button"><i data-lucide="image"></i>喷漆</button>
+          <button id="ai-settings-nav" class="nav-item" data-nav-id="ai-settings" draggable="true" type="button"><i data-lucide="brain-circuit"></i>AI 设置</button>
         </nav>
 
         <div class="sidebar-footer">
@@ -39,7 +40,6 @@
       <section class="content">
         <header class="topbar">
           <div>
-            <div id="page-eyebrow" class="eyebrow">SURVIVAL LIBRARY / 01</div>
             <h1 id="page-title">我的 Mod</h1>
           </div>
           <div class="top-actions">
@@ -49,9 +49,11 @@
               <kbd>/</kbd>
             </div>
             <button id="refresh-button-top" class="icon-button" type="button" title="刷新目录" aria-label="刷新目录"><i data-lucide="refresh-cw"></i></button>
+            <button id="spray-manager-button" class="outline-button hidden" type="button" title="配置喷漆素材"><i data-lucide="paintbrush"></i>配置喷漆</button>
+            <button id="workshop-button" class="outline-button" type="button" title="扫描 Workshop 新 Mod"><i data-lucide="folder-down"></i>扫描 Workshop</button>
             <button id="import-button" class="primary-button" type="button"><i data-lucide="archive-restore"></i>导入压缩包</button>
             <input id="import-input" type="file" hidden accept=".zip,.tar,.gz,.tgz,.bz2,.xz,.7z,.rar" />
-            <button id="settings-button" class="icon-button" type="button" title="AI 设置" aria-label="AI 设置"><i data-lucide="settings-2"></i></button>
+            <button id="settings-button" class="icon-button" type="button" title="隐藏左侧操作栏" aria-label="隐藏左侧操作栏" aria-pressed="false"><i data-lucide="panel-left"></i></button>
           </div>
         </header>
 
@@ -69,6 +71,11 @@
               <button class="filter" data-filter="missing_preview" type="button">缺少预览图</button>
               <button class="filter" data-filter="image_without_vpk" type="button">缺少 VPK</button>
               <button class="filter" data-filter="disabled" type="button">已停用</button>
+              <button class="filter filter-conflict" data-filter="conflict" type="button">模型冲突</button>
+            </div>
+            <div id="role-filters" class="filters role-filters hidden" role="tablist" aria-label="角色调整类型">
+              <button class="role-filter active" data-role-side="survivor" type="button">生还者角色调整</button>
+              <button class="role-filter" data-role-side="infected" type="button">感染者角色调整</button>
             </div>
             <div id="model-filters" class="filters model-filters hidden" role="tablist" aria-label="模型类型筛选">
               <button class="sub-filter active" data-model-category="all" type="button">全部模型</button>
@@ -104,10 +111,33 @@
         <span id="operation-message">正在处理，请稍候…</span>
       </div>
     </div>
+    <dialog id="workshop-dialog" class="workshop-dialog">
+      <div class="import-preview-head">
+        <div>
+          <h2>Workshop 新 Mod</h2>
+          <p id="workshop-summary" class="import-preview-summary"></p>
+        </div>
+        <button id="workshop-close" class="icon-button" type="button" title="关闭" aria-label="关闭 Workshop 列表"><i data-lucide="x"></i></button>
+      </div>
+      <div class="workshop-toolbar">
+        <label><input id="workshop-select-all" type="checkbox" />全选</label>
+        <span id="workshop-selected-count">已选择 0 个</span>
+      </div>
+      <div id="workshop-list" class="workshop-list"></div>
+      <div class="import-preview-foot">
+        <div id="workshop-status" class="import-preview-status"></div>
+        <button id="workshop-copy" class="primary-button" type="button"><i data-lucide="copy"></i>复制到工作区</button>
+      </div>
+      <div id="workshop-loading" class="workshop-loading hidden" role="status" aria-live="polite">
+        <div class="operation-status">
+          <span class="operation-spinner" aria-hidden="true"></span>
+          <span id="workshop-loading-message">正在复制 Workshop Mod，请稍候…</span>
+        </div>
+      </div>
+    </dialog>
     <dialog id="ai-dialog" class="ai-dialog">
       <div class="ai-dialog-head">
         <div>
-          <div class="eyebrow">DEEPSEEK ANALYSIS</div>
           <h2 id="ai-dialog-title">AI 分析</h2>
         </div>
         <button id="ai-dialog-close" class="icon-button" type="button" title="关闭" aria-label="关闭 AI 分析"><i data-lucide="x"></i></button>
@@ -136,7 +166,6 @@
     <dialog id="import-preview-dialog" class="import-preview-dialog">
       <div class="import-preview-head">
         <div>
-          <div class="eyebrow">IMPORT INSPECTION</div>
           <h2>导入检测预览</h2>
           <p id="import-preview-summary" class="import-preview-summary"></p>
         </div>
@@ -151,7 +180,6 @@
     <dialog id="vpk-files-dialog" class="vpk-files-dialog">
       <div class="vpk-files-head">
         <div>
-          <div class="eyebrow">MOD FILES</div>
           <h2 id="vpk-files-title">关联的 VPK 文件</h2>
           <p id="vpk-files-summary" class="vpk-files-summary"></p>
           <p id="vpk-files-note" class="vpk-files-note">只有标记为“内容重复”的文件适合优先清理；普通分卷文件请保留。</p>
@@ -160,15 +188,65 @@
       </div>
       <div id="vpk-files-list" class="vpk-files-list"></div>
     </dialog>
+    <dialog id="spray-dialog" class="spray-dialog">
+      <div class="vpk-files-head">
+        <div>
+          <h2>配置喷漆素材</h2>
+          <p id="spray-summary" class="vpk-files-summary"></p>
+          <p class="vpk-files-note">每个槽位只能放一张喷漆；未分配的素材不会写入组合包。</p>
+          <div class="spray-slot-usage-head"><strong>标准槽位使用情况</strong><span id="spray-slot-summary"></span></div>
+          <div id="spray-slot-usage" class="spray-slot-usage" aria-label="标准喷漆槽位使用情况"></div>
+        </div>
+        <button id="spray-close" class="icon-button" type="button" title="关闭" aria-label="关闭喷漆配置"><i data-lucide="x"></i></button>
+      </div>
+      <div class="spray-toolbar">
+        <div class="spray-tabs" role="tablist" aria-label="喷漆来源">
+          <button class="spray-tab active" data-spray-source="mod" role="tab" type="button">来自 Mod</button>
+          <button class="spray-tab" data-spray-source="imported" role="tab" type="button">来自导入</button>
+        </div>
+        <button id="spray-import-button" class="outline-button" type="button" title="导入图片作为喷漆（GIF 自动取第一帧）"><i data-lucide="upload"></i>导入图片</button>
+        <input id="spray-import-input" type="file" hidden accept="image/png,image/jpeg,image/webp,image/gif" multiple />
+      </div>
+      <div id="spray-list" class="spray-list"></div>
+      <div id="spray-drop-overlay" class="spray-drop-overlay hidden" aria-hidden="true">
+        <i data-lucide="upload-cloud"></i>
+        <strong>松开鼠标导入图片</strong>
+      </div>
+      <div class="spray-actions">
+        <div id="spray-status" class="spray-status"></div>
+        <button id="spray-reset" class="outline-button" type="button" title="清除最近一次保存的自定义喷漆配置"><i data-lucide="rotate-ccw"></i>重置使用情况</button>
+        <button id="spray-apply" class="primary-button" type="button"><i data-lucide="save"></i>应用组合喷漆</button>
+      </div>
+      <div id="spray-loading" class="nekovpk-loading hidden" role="status" aria-live="polite">
+        <div class="operation-status">
+          <span class="operation-spinner" aria-hidden="true"></span>
+          <span id="spray-loading-message">正在处理喷漆，请稍候…</span>
+        </div>
+      </div>
+    </dialog>
+    <dialog id="spray-config-dialog" class="spray-config-dialog">
+      <div class="vpk-files-head">
+        <div>
+          <h2>配置导入喷漆</h2>
+          <p id="spray-config-summary" class="vpk-files-summary"></p>
+        </div>
+        <button id="spray-config-close" class="icon-button" type="button" title="关闭" aria-label="关闭喷漆配置编辑"><i data-lucide="x"></i></button>
+      </div>
+      <div id="spray-config-body" class="spray-config-body"></div>
+      <div class="spray-config-actions">
+        <div id="spray-config-status" class="spray-status"></div>
+        <button id="spray-config-cancel" class="outline-button" type="button">取消</button>
+        <button id="spray-config-save" class="primary-button" type="button"><i data-lucide="save"></i>保存配置</button>
+      </div>
+    </dialog>
     <dialog id="nekovpk-dialog" class="nekovpk-dialog">
       <div class="vpk-files-head">
         <div>
-          <div class="eyebrow">NEKOVPK TARGETS</div>
-          <h2 id="nekovpk-title">角色调整</h2>
+          <h2 id="nekovpk-title">替换角色</h2>
           <p id="nekovpk-summary" class="vpk-files-summary"></p>
-          <p class="vpk-files-note">只会替换这个 NekoVPK 的预置角色资源，普通 VPK 不受影响。</p>
+          <p class="vpk-files-note">NekoVPK 使用作者预置资源；普通 VPK 使用实验性路径映射。</p>
         </div>
-        <button id="nekovpk-close" class="icon-button" type="button" title="关闭" aria-label="关闭角色调整"><i data-lucide="x"></i></button>
+        <button id="nekovpk-close" class="icon-button" type="button" title="关闭" aria-label="关闭角色替换"><i data-lucide="x"></i></button>
       </div>
       <div id="nekovpk-target-list" class="nekovpk-target-list"></div>
       <div id="nekovpk-loading" class="nekovpk-loading hidden" role="status" aria-live="polite">
@@ -181,7 +259,6 @@
     <dialog id="voice-dialog" class="voice-dialog">
       <div class="vpk-files-head">
         <div>
-          <div class="eyebrow">VOICE REPLACEMENT</div>
           <h2 id="voice-title">语音替换</h2>
           <p id="voice-summary" class="vpk-files-summary"></p>
           <p class="vpk-files-note">只会按语音文件名覆盖游戏语音，并在安装前备份原文件；不会运行 VPK 内的脚本。</p>
@@ -203,7 +280,6 @@
     <aside id="ai-settings-panel" class="ai-settings-panel hidden" aria-label="AI 设置">
       <div class="ai-settings-head">
         <div>
-          <div class="eyebrow">MODEL CONNECTION</div>
           <h2>AI 设置</h2>
         </div>
         <button id="ai-settings-close" class="icon-button" type="button" title="关闭" aria-label="关闭 AI 设置"><i data-lucide="x"></i></button>
@@ -224,6 +300,6 @@
       </div>
     </aside>
     <script src="https://unpkg.com/lucide@latest"></script>
-    <script src="app.js"></script>
+    <script src="app.js?v=20260827"></script>
   </body>
 </html>

@@ -6,12 +6,17 @@ import tkinter as tk
 from tkinter import filedialog
 
 
-def main() -> None:
+def choose_folder() -> str:
     root = tk.Tk()
     root.withdraw()
     root.attributes("-topmost", True)
     selected = filedialog.askdirectory(title="选择 L4D2 Mod 文件夹")
     root.destroy()
+    return selected or ""
+
+
+def main() -> None:
+    selected = choose_folder()
     if selected:
         print(selected)
 

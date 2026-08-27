@@ -1,3 +1,4 @@
+import base64
 import json
 import io
 import os
@@ -16,10 +17,27 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mod_catalog import build_catalog, save_custom_names, save_custom_tags
-from mod_server import ModRequestHandler, extract_archive, rename_mod_files
-from nekovpk import convert_nekovpk_target, inspect_nekovpk, write_vpk_entries
+from manager_storage import ensure_manager_data_layout, migrate_voice_backup_path
+from mod_server import (
+    ModRequestHandler,
+    copy_workshop_mods,
+    extract_archive,
+    rename_mod_files,
+    scan_workshop_mods,
+    toggle_mod_enabled,
+)
+from spray_manager import apply_spray_collection, delete_imported_spray, import_spray_images, list_spray_assets, save_spray_configuration, spray_preview_asset
+from spray_manager import _decode_dxt5, _decode_vtf, _encode_imported_vtf
+from nekovpk import (
+    convert_nekovpk_target,
+    inspect_nekovpk,
+    map_nekovpk_target,
+    read_vpk_entries,
+    write_vpk_entries,
+)
 from voice_replacement import (
     VoiceReplacementError,
+    detect_voice_replacement_mode,
     inspect_voice_package,
     install_voice_package,
     restore_voice_package,
@@ -28,6 +46,7 @@ from vpk_detector import (
     VPKClassificationError,
     analyze_vpk,
     classify_paths,
+    read_vpk_file,
     read_vpk_paths,
     read_vpk_addon_title,
 )
@@ -185,6 +204,27 @@ try {
 
 
 class VPKDetectorTests(unittest.TestCase):
+    def test_manager_data_layout_migrates_legacy_directories(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / ".l4d2_mod_manager_spray_previews").mkdir()
+            (root / ".l4d2_mod_manager_spray_previews" / "preview.png").write_bytes(b"preview")
+            (root / ".l4d2_voice_backups" / "install").mkdir(parents=True)
+            (root / ".l4d2_voice_backups" / "install" / "original.wav").write_bytes(b"voice")
+            (root / ".l4d2_mod_manager_sprays.json").write_text('{"assignments": {}}', encoding="utf-8")
+
+            data_root = ensure_manager_data_layout(root)
+
+            self.assertEqual(data_root, root / "tudou mod manger")
+            self.assertTrue((data_root / ".l4d2_mod_manager_spray_previews" / "preview.png").is_file())
+            self.assertTrue((data_root / ".l4d2_voice_backups" / "install" / "original.wav").is_file())
+            self.assertTrue((data_root / ".l4d2_mod_manager_sprays.json").is_file())
+            self.assertFalse((root / ".l4d2_voice_backups").exists())
+            self.assertEqual(
+                migrate_voice_backup_path(".l4d2_voice_backups/install"),
+                "tudou mod manger/.l4d2_voice_backups/install",
+            )
+
     def test_nekovpk_writer_uses_standard_extension_groups_and_crcs(self):
         entries = {
             "models/survivors/survivor_gambler.mdl": b"model",
@@ -263,10 +303,27 @@ class VPKDetectorTests(unittest.TestCase):
             self.assertTrue((addons / result["backupDir"] / "left4dead2/sound/player/survivor/voice/manager/alertgiveitem01.wav").is_file())
             catalog_server.catalog_cache = None
             self.assertTrue(catalog_handler._catalog(refresh=True)[0]["voiceInstalled"])
+
+            teengirl_voice = workspace / "left4dead2_dlc1/sound/player/survivor/voice/teengirl"
+            teengirl_voice.mkdir(parents=True)
+            zoey_path = addons / "zoey.vpk"
+            zoey_path.write_bytes(
+                make_vpk_files(
+                    {
+                        "sound/player/survivor/voice/teengirl/alertgiveitem01.wav": b"zoey replacement",
+                    }
+                )
+            )
+            zoey_mod = next(item for item in build_catalog(addons) if item["id"] == "zoey")
+            zoey_preview = inspect_voice_package(addons, zoey_mod)
+            self.assertEqual(zoey_preview["conflicts"], [])
+            install_voice_package(addons, zoey_mod)
+
             with self.assertRaises(VoiceReplacementError):
                 install_voice_package(addons, mod)
 
             restore_voice_package(addons, mod["id"])
+            restore_voice_package(addons, zoey_mod["id"])
             self.assertEqual((base_voice / "alertgiveitem01.wav").read_bytes(), b"original-base")
             self.assertEqual((dlc_voice / "alertgiveitem01.wav").read_bytes(), b"original-dlc")
             self.assertFalse((base_voice / "alertgiveitem02.wav").exists())
@@ -326,6 +383,47 @@ class VPKDetectorTests(unittest.TestCase):
             restored_crcs = read_vpk_entry_crcs(path)
             self.assertEqual(len(restored_crcs), len(restored_paths))
             self.assertTrue(all(restored_crcs.values()))
+
+    def test_nekovpk_experimental_mapping_rewrites_complete_model_paths(self):
+        nested = make_neko7z(
+            {
+                "models/survivors/survivor_gambler.mdl": b"nick-model",
+                "models/survivors/survivor_gambler.vvd": b"nick-vvd",
+                "models/survivors/survivor_gambler.dx90.vtx": b"nick-vtx",
+                "models/weapons/arms/v_arms_gambler_new.mdl": b"nick-arms",
+                "models/weapons/arms/v_arms_gambler_new.vvd": b"nick-arms-vvd",
+                "models/weapons/arms/v_arms_gambler_new.dx90.vtx": b"nick-arms-vtx",
+            }
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = root / "mapped.vpk"
+            path.write_bytes(
+                make_vpk_files(
+                    {
+                        "models/survivors/survivor_namvet.mdl": b"bill-model",
+                        "models/survivors/survivor_namvet.vvd": b"bill-vvd",
+                        "models/survivors/survivor_namvet.dx90.vtx": b"bill-vtx",
+                        "models/weapons/arms/v_arms_bill.mdl": b"bill-arms",
+                        "models/weapons/arms/v_arms_bill.vvd": b"bill-arms-vvd",
+                        "models/weapons/arms/v_arms_bill.dx90.vtx": b"bill-arms-vtx",
+                        "materials/vgui/s_panel_namvet.vtf": b"bill-panel",
+                        "nekovpk/example/0.neko7z": nested,
+                    }
+                )
+            )
+
+            info = inspect_nekovpk(path)
+            mapping = next(item for item in info["mapping"]["targets"] if item["id"] == "nick")
+            self.assertTrue(mapping["ready"])
+            result = map_nekovpk_target(path, "nick")
+            self.assertTrue(result["experimental"])
+            self.assertTrue((root / "mapped.vpk.nekobak").is_file())
+            entries = read_vpk_entries(path)
+            self.assertEqual(entries["models/survivors/survivor_gambler.mdl"], b"bill-model")
+            self.assertEqual(entries["models/weapons/arms/v_arms_gambler_new.vvd"], b"bill-arms-vvd")
+            self.assertEqual(entries["materials/vgui/s_panel_gambler.vtf"], b"bill-panel")
+            self.assertNotIn("models/survivors/survivor_namvet.mdl", entries)
 
     def test_server_exposes_only_nekovpk_target_conversion(self):
         nested = make_neko7z(
@@ -420,6 +518,30 @@ class VPKDetectorTests(unittest.TestCase):
         )
         self.assertEqual(voice["primary"], "voice_replacement")
         self.assertIn("sound", voice["categories"])
+
+    def test_detects_voice_replacement_mode(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            automatic = root / "automatic.vpk"
+            automatic.write_bytes(
+                make_vpk_files(
+                    {
+                        "addoninfo.txt": b'"AddonInfo"\n{ "addontitle" "Voice" }',
+                        "sound/player/survivor/voice/teengirl/alert01.wav": b"voice",
+                    }
+                )
+            )
+            manual = root / "manual.vpk"
+            manual.write_bytes(
+                make_vpk_files(
+                    {
+                        "addoninfo.txt": b"@echo off\nset game_root=left4dead2",
+                        "sound/player/survivor/voice/manager/alert01.wav": b"voice",
+                    }
+                )
+            )
+            self.assertEqual(detect_voice_replacement_mode(automatic), "automatic")
+            self.assertEqual(detect_voice_replacement_mode(manual), "manual")
 
     def test_classifies_ui_scripts_and_environment_models(self):
         self.assertEqual(
@@ -568,6 +690,29 @@ class VPKDetectorTests(unittest.TestCase):
             self.assertEqual(linked["vpkFiles"], ["3484097222.vpk"])
             self.assertEqual(orphan["status"], "image_without_vpk")
 
+    def test_catalog_marks_vpk_with_embedded_archive(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "2914696195.vpk").write_bytes(make_vpk_files({"coach.7z": b"not opened"}))
+            (root / "2914696195.jpg").write_bytes(b"preview")
+
+            mod = build_catalog(root)[0]
+
+            self.assertIn("archive", mod["categories"])
+            self.assertIn("archive", mod["primaryCategories"])
+            self.assertEqual(mod["errors"], [])
+
+            (root / "normal.vpk").write_bytes(
+                make_vpk_files(
+                    {
+                        "models/survivors/survivor_coach.mdl": b"model",
+                        "materials/models/coach/accessory.7z": b"resource",
+                    }
+                )
+            )
+            normal = next(item for item in build_catalog(root) if item["id"] == "normal")
+            self.assertNotIn("archive", normal["categories"])
+
     def test_custom_name_is_persisted_in_catalog(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -588,6 +733,32 @@ class VPKDetectorTests(unittest.TestCase):
             self.assertEqual(catalog[0]["vpkFiles"], ["sample.vpk1"])
             self.assertFalse(catalog[0]["enabled"])
 
+    def test_workshop_mods_are_scanned_and_copied_to_workspace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workshop = root / "workshop"
+            workshop.mkdir()
+            content = make_vpk(["maps/c1m1_hotel.bsp"])
+            (workshop / "new_mod.vpk").write_bytes(content)
+            (workshop / "new_mod.jpg").write_bytes(b"preview")
+
+            self.assertEqual(build_catalog(root), [])
+            scanned = scan_workshop_mods(root)
+            self.assertTrue(scanned["available"])
+            self.assertEqual([item["id"] for item in scanned["mods"]], ["new_mod.vpk"])
+            self.assertEqual(
+                {item["name"] for item in scanned["mods"][0]["files"]},
+                {"new_mod.vpk", "new_mod.jpg"},
+            )
+
+            result = copy_workshop_mods(root, ["new_mod.vpk"])
+            self.assertEqual(set(result["imported"]), {"new_mod.vpk", "new_mod.jpg"})
+            self.assertTrue((root / "new_mod.vpk").is_file())
+            self.assertTrue((root / "new_mod.jpg").is_file())
+            self.assertTrue((workshop / "new_mod.vpk").is_file())
+            self.assertEqual(scan_workshop_mods(root)["mods"], [])
+            self.assertEqual(build_catalog(root)[0]["vpkFiles"], ["new_mod.vpk"])
+
     def test_zip_import_is_safe(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -604,6 +775,425 @@ class VPKDetectorTests(unittest.TestCase):
                 package.writestr("folder/new_mod.vpk", make_vpk(["maps/c1m1_hotel.bsp"]))
             result = extract_archive(clean_archive, root)
             self.assertEqual(result["imported"], ["folder/new_mod.vpk"])
+
+    def test_spray_collection_combines_individual_assets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first_files = {
+                "scripts/sprays_manifest.txt": b"sprays_manifest { \"1\" \"1.vtf\" \"2\" \"2.vtf\" }",
+                "materials/vgui/logos/1.vtf": b"first-one",
+                "materials/vgui/logos/1.vmt": b'"UnlitGeneric" { "$basetexture" "vgui/logos/1" }',
+                "materials/vgui/logos/2.vtf": b"first-two",
+                "materials/vgui/logos/2.vmt": b'"UnlitGeneric" { "$basetexture" "vgui/logos/2" }',
+            }
+            second_files = {
+                "scripts/sprays_manifest.txt": b"sprays_manifest { \"1\" \"1.vtf\" }",
+                "materials/vgui/logos/1.vtf": b"second-one",
+                "materials/vgui/logos/1.vmt": b'"UnlitGeneric" { "$basetexture" "vgui/logos/1" }',
+            }
+            (root / "first.vpk").write_bytes(make_vpk_files(first_files))
+            (root / "second.vpk").write_bytes(make_vpk_files(second_files))
+            catalog = build_catalog(root)
+            data = list_spray_assets(root, catalog)
+            self.assertEqual(len(data["assets"]), 3)
+            self.assertEqual(data["slots"], ["1", "2"])
+            first_one = next(asset for asset in data["assets"] if asset["modId"] == "first" and asset["sourceSlot"] == "1")
+            second_one = next(asset for asset in data["assets"] if asset["modId"] == "second")
+
+            result = apply_spray_collection(
+                root,
+                catalog,
+                {"1": first_one["id"], "2": second_one["id"]},
+                toggle_callback=toggle_mod_enabled,
+            )
+
+            self.assertEqual(set(result["assignments"]), {"1", "2"})
+            self.assertTrue((root / "first.vpk1").exists())
+            self.assertTrue((root / "second.vpk1").exists())
+            generated = read_vpk_entries(root / "L4D2ModManager_SprayCollection.vpk")
+            self.assertEqual(generated["materials/vgui/logos/1.vtf"], b"first-one")
+            self.assertEqual(generated["materials/vgui/logos/2.vtf"], b"second-one")
+            self.assertIn(b'"$basetexture" "vgui/logos/1"', generated["materials/vgui/logos/1.vmt"])
+            self.assertIn(b'"$basetexture" "vgui/logos/2"', generated["materials/vgui/logos/2.vmt"])
+            reopened = list_spray_assets(root, build_catalog(root))
+            self.assertEqual(reopened["assignments"], result["assignments"])
+            self.assertNotIn("L4D2ModManager_SprayCollection.vpk", [item["vpkFiles"][0] for item in build_catalog(root)])
+
+    def test_spray_collection_preserves_animated_dxt5_vtf_and_rewrites_material_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            animated_vtf = bytearray(64)
+            struct.pack_into("<4sII", animated_vtf, 0, b"VTF\x00", 7, 2)
+            struct.pack_into("<I", animated_vtf, 12, 64)
+            struct.pack_into("<HH", animated_vtf, 16, 256, 256)
+            struct.pack_into("<I", animated_vtf, 20, 0x2000)
+            struct.pack_into("<HH", animated_vtf, 24, 5, 0)
+            struct.pack_into("<I", animated_vtf, 52, 15)  # DXT5
+            animated_vtf[56] = 9
+            animated_vtf[57] = 13
+            animated_vtf.extend(b"animated-dxt5-payload")
+            source_files = {
+                "scripts/sprays_manifest.txt": b'sprays_manifest { "shaonv" "shaonv.vtf" }',
+                "materials/vgui/logos/shaonv.vtf": bytes(animated_vtf),
+                "materials/vgui/logos/shaonv.vmt": (
+                    b'"UnlitGeneric" { "$basetexture" "VGUI\\logos\\custom/xiaoan" }'
+                ),
+            }
+            source = root / "animated.vpk"
+            source.write_bytes(make_vpk_files(source_files))
+            catalog = build_catalog(root)
+            asset = next(item for item in list_spray_assets(root, catalog)["assets"])
+
+            result = apply_spray_collection(root, catalog, {"11": asset["id"]})
+            generated = read_vpk_entries(root / "L4D2ModManager_SprayCollection.vpk")
+            output_vtf = generated["materials/vgui/logos/11.vtf"]
+            output_vmt = generated["materials/vgui/logos/11.vmt"]
+
+            self.assertEqual(output_vtf, bytes(animated_vtf))
+            self.assertEqual(struct.unpack_from("<H", output_vtf, 24)[0], 5)
+            self.assertEqual(struct.unpack_from("<I", output_vtf, 52)[0], 15)
+            self.assertEqual(output_vtf[56], 9)
+            self.assertIn(b'"$basetexture" "vgui/logos/11"', output_vmt)
+            self.assertEqual(result["assignments"], {"11": asset["id"]})
+
+    def test_spray_collection_disables_unlisted_root_spray_vpk(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_files = {
+                "scripts/sprays_manifest.txt": b'sprays_manifest { "1" "1.vtf" }',
+                "materials/vgui/logos/1.vtf": b"source-one",
+                "materials/vgui/logos/1.vmt": b'"UnlitGeneric" { "$basetexture" "1" }',
+            }
+            source = root / "hidden-source.vpk"
+            source.write_bytes(make_vpk_files(source_files))
+            catalog = build_catalog(root)
+            asset = next(item for item in list_spray_assets(root, catalog)["assets"])
+
+            apply_spray_collection(root, catalog, {"1": asset["id"]}, toggle_callback=toggle_mod_enabled)
+
+            self.assertFalse(source.exists())
+            self.assertTrue((root / "hidden-source.vpk1").exists())
+
+    def test_spray_collection_handles_existing_disabled_duplicate(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_files = {
+                "scripts/sprays_manifest.txt": b'sprays_manifest { "1" "1.vtf" }',
+                "materials/vgui/logos/1.vtf": b"source-one",
+                "materials/vgui/logos/1.vmt": b'"UnlitGeneric" { "$basetexture" "1" }',
+            }
+            source = root / "source.vpk"
+            workshop_source = root / "workshop" / "duplicate.vpk"
+            stale_disabled = root / "workshop" / "duplicate.vpk1"
+            workshop_source.parent.mkdir()
+            source.write_bytes(make_vpk_files(source_files))
+            workshop_source.write_bytes(make_vpk_files(source_files))
+            stale_disabled.write_bytes(b"older-disabled-copy")
+            catalog = build_catalog(root)
+            asset = next(item for item in list_spray_assets(root, catalog)["assets"])
+
+            result = apply_spray_collection(
+                root,
+                catalog,
+                {"1": asset["id"]},
+                toggle_callback=toggle_mod_enabled,
+            )
+
+            self.assertFalse(source.exists())
+            self.assertTrue((root / "workshop" / "duplicate.vpk1").is_file())
+            self.assertEqual((root / "workshop" / "duplicate.vpk1").read_bytes(), make_vpk_files(source_files))
+            self.assertEqual(len(result["vpkBackups"]), 1)
+            backup = root / result["vpkBackups"][0]
+            self.assertTrue(backup.is_file())
+            self.assertEqual(backup.read_bytes(), b"older-disabled-copy")
+
+    def test_spray_collection_disables_active_workshop_spray_packages(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_files = {
+                "scripts/sprays_manifest.txt": b'sprays_manifest { "1" "1.vtf" }',
+                "materials/vgui/logos/1.vtf": b"source-one",
+                "materials/vgui/logos/1.vmt": b'"UnlitGeneric" { "$basetexture" "vgui/logos/1" }',
+            }
+            source = root / "source.vpk"
+            workshop = root / "workshop" / "workshop-spray.vpk"
+            workshop.parent.mkdir()
+            source.write_bytes(make_vpk_files(source_files))
+            workshop.write_bytes(make_vpk_files(source_files))
+            catalog = build_catalog(root)
+            asset = next(item for item in list_spray_assets(root, catalog)["assets"] if item["modId"] == "source")
+
+            apply_spray_collection(root, catalog, {"1": asset["id"]}, toggle_callback=toggle_mod_enabled)
+
+            self.assertTrue((root / "source.vpk1").is_file())
+            self.assertTrue((root / "workshop" / "workshop-spray.vpk1").is_file())
+            self.assertFalse(source.exists())
+            self.assertFalse(workshop.exists())
+
+    def test_spray_collection_moves_loose_standard_sprays_to_reversible_backup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            game_root = Path(temp_dir)
+            addons = game_root / "addons"
+            addons.mkdir()
+            source_files = {
+                "scripts/sprays_manifest.txt": b'sprays_manifest { "1" "1.vtf" }',
+                "materials/vgui/logos/1.vtf": b"source-one",
+                "materials/vgui/logos/1.vmt": b'"UnlitGeneric" { "$basetexture" "vgui/logos/1" }',
+            }
+            (addons / "source.vpk").write_bytes(make_vpk_files(source_files))
+            loose_root = game_root / "materials" / "vgui" / "logos"
+            (loose_root / "1.vtf").parent.mkdir(parents=True)
+            (loose_root / "1.vtf").write_bytes(b"loose-vtf")
+            (loose_root / "1.vmt").write_bytes(b"loose-vmt")
+            asset = next(item for item in list_spray_assets(addons, build_catalog(addons))["assets"])
+
+            result = apply_spray_collection(addons, build_catalog(addons), {"1": asset["id"]})
+
+            self.assertEqual(set(result["looseFilesMoved"]), {"materials/vgui/logos/1.vtf", "materials/vgui/logos/1.vmt"})
+            self.assertFalse((loose_root / "1.vtf").exists())
+            self.assertFalse((loose_root / "1.vmt").exists())
+            backup_files = list((addons / "tudou mod manger" / "spray_loose_backups").rglob("*"))
+            self.assertTrue(any(path.name == "1.vtf" and path.read_bytes() == b"loose-vtf" for path in backup_files))
+            self.assertTrue(any(path.name == "1.vmt" and path.read_bytes() == b"loose-vmt" for path in backup_files))
+
+    def test_imported_spray_image_can_be_added_to_collection(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_buffer = io.BytesIO()
+            Image.new("RGBA", (2, 2), (255, 0, 0, 255)).save(image_buffer, format="PNG")
+            result = import_spray_images(
+                root,
+                [{"name": "自定义喷漆.png", "data": base64.b64encode(image_buffer.getvalue()).decode("ascii")}],
+            )
+            self.assertEqual(len(result["imported"]), 1)
+            data = list_spray_assets(root, build_catalog(root))
+            asset = next(item for item in data["assets"] if item["sourceType"] == "imported")
+            self.assertTrue(spray_preview_asset(root, asset).startswith(b"\x89PNG"))
+
+            apply_spray_collection(root, build_catalog(root), {"1": asset["id"]})
+            entries = read_vpk_entries(root / "L4D2ModManager_SprayCollection.vpk")
+            self.assertTrue(entries["materials/vgui/logos/1.vtf"].startswith(b"VTF\x00"))
+            self.assertIn(b'"LightmappedGeneric"', entries["materials/vgui/logos/1.vmt"])
+            self.assertIn(b'"$decal" "1"', entries["materials/vgui/logos/1.vmt"])
+
+    def test_imported_spray_vtf_matches_animated_vtf_layout(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "spray.png"
+            Image.new("RGBA", (32, 32), (255, 0, 0, 255)).save(path)
+
+            vtf = _encode_imported_vtf(path)
+
+            self.assertEqual(struct.unpack_from("<II", vtf, 4), (7, 2))
+            self.assertEqual(struct.unpack_from("<I", vtf, 12)[0], 80)
+            self.assertEqual(struct.unpack_from("<HH", vtf, 16), (32, 32))
+            self.assertEqual(struct.unpack_from("<I", vtf, 52)[0], 15)
+            self.assertEqual(vtf[56], 6)
+            self.assertEqual(struct.unpack_from("<I", vtf, 57)[0], 13)
+            self.assertEqual(tuple(vtf[61:63]), (16, 16))
+            width, height, pixels = _decode_vtf(vtf)
+            self.assertEqual((width, height), (32, 32))
+            decoded_pixels = [pixels[index:index + 4] for index in range(0, len(pixels), 4)]
+            self.assertTrue(all(pixel[0] == 255 and pixel[1] == 0 and pixel[2] <= 8 and pixel[3] == 255 for pixel in decoded_pixels))
+
+    def test_imported_spray_vtf_pads_rectangular_images_to_power_of_two_square(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "spray.png"
+            Image.new("RGBA", (118, 104), (255, 0, 0, 255)).save(path)
+
+            vtf = _encode_imported_vtf(path)
+
+            self.assertEqual(struct.unpack_from("<HH", vtf, 16), (128, 128))
+            self.assertEqual(vtf[56], 8)
+            width, height, pixels = _decode_vtf(vtf)
+            self.assertEqual((width, height), (128, 128))
+            self.assertEqual(tuple(pixels[:4]), (0, 0, 0, 0))
+            center = (height // 2 * width + width // 2) * 4
+            center_pixel = tuple(pixels[center:center + 4])
+            self.assertEqual(center_pixel[0], 255)
+            self.assertEqual(center_pixel[1], 0)
+            self.assertLessEqual(center_pixel[2], 8)
+            self.assertEqual(center_pixel[3], 255)
+
+    def test_imported_gif_preserves_animation_frames(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_buffer = io.BytesIO()
+            first_frame = Image.new("RGBA", (2, 2), (255, 0, 0, 255))
+            second_frame = Image.new("RGBA", (2, 2), (0, 0, 255, 255))
+            first_frame.save(image_buffer, format="GIF", save_all=True, append_images=[second_frame], loop=0)
+
+            result = import_spray_images(
+                root,
+                [{"name": "动态喷漆.gif", "data": base64.b64encode(image_buffer.getvalue()).decode("ascii")}],
+            )
+            self.assertEqual(len(result["imported"]), 1)
+            self.assertTrue(result["imported"][0].endswith(".gif"))
+            imported_path = root / "tudou mod manger" / "imported_sprays" / result["imported"][0]
+            with Image.open(imported_path) as imported:
+                self.assertEqual(imported.format, "GIF")
+                self.assertEqual(imported.n_frames, 2)
+            vtf = _encode_imported_vtf(imported_path)
+            self.assertEqual(struct.unpack_from("<H", vtf, 24)[0], 2)
+            self.assertEqual(struct.unpack_from("<HH", vtf, 16), (32, 32))
+            self.assertEqual(struct.unpack_from("<I", vtf, 52)[0], 15)
+            width, height, pixels = _decode_vtf(vtf)
+            self.assertEqual((width, height), (32, 32))
+            center = (height // 2 * width + width // 2) * 4
+            first_pixel = tuple(pixels[center:center + 4])
+            self.assertEqual(first_pixel[0], 255)
+            self.assertEqual(first_pixel[1], 0)
+            self.assertLessEqual(first_pixel[2], 8)
+            self.assertEqual(first_pixel[3], 255)
+
+    def test_imported_gif_is_limited_to_256_pixels_for_game_sprays(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "large.gif"
+            Image.new("RGBA", (500, 500), (255, 0, 0, 255)).save(path, format="GIF")
+
+            vtf = _encode_imported_vtf(path)
+
+            self.assertEqual(struct.unpack_from("<HH", vtf, 16), (256, 256))
+
+    def test_imported_gif_uses_unlit_material_when_applied(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_buffer = io.BytesIO()
+            first_frame = Image.new("RGBA", (2, 2), (255, 0, 0, 255))
+            second_frame = Image.new("RGBA", (2, 2), (0, 0, 255, 255))
+            first_frame.save(image_buffer, format="GIF", save_all=True, append_images=[second_frame], loop=0)
+
+            import_spray_images(
+                root,
+                [{"name": "动态喷漆.gif", "data": base64.b64encode(image_buffer.getvalue()).decode("ascii")}],
+            )
+            asset = next(
+                item
+                for item in list_spray_assets(root, build_catalog(root))["assets"]
+                if item["sourceType"] == "imported"
+            )
+
+            result = apply_spray_collection(root, build_catalog(root), {"4": asset["id"]})
+
+            collection = root / result["vpk"]
+            vmt = read_vpk_file(collection, "materials/vgui/logos/4.vmt").decode("ascii")
+            self.assertIn('"UnlitGeneric"', vmt)
+            self.assertIn('"$basetexture" "vgui/logos/4"', vmt)
+            self.assertNotIn('"LightmappedGeneric"', vmt)
+
+    def test_imported_spray_config_supports_static_dynamic_and_gradient(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            images = []
+            for name, color in (("red.png", (255, 0, 0, 255)), ("blue.png", (0, 0, 255, 255))):
+                buffer = io.BytesIO()
+                Image.new("RGBA", (8, 8), color).save(buffer, format="PNG")
+                images.append({"name": name, "data": base64.b64encode(buffer.getvalue()).decode("ascii")})
+            gif_buffer = io.BytesIO()
+            Image.new("RGBA", (8, 8), (255, 0, 0, 255)).save(
+                gif_buffer,
+                format="GIF",
+                save_all=True,
+                append_images=[Image.new("RGBA", (8, 8), (0, 0, 255, 255))],
+                loop=0,
+            )
+            images.append({"name": "animated.gif", "data": base64.b64encode(gif_buffer.getvalue()).decode("ascii")})
+            import_spray_images(root, images)
+            assets = list_spray_assets(root, build_catalog(root))["assets"]
+            imported = {Path(item["filename"]).stem.rsplit("-", 1)[0]: item for item in assets if item["sourceType"] == "imported"}
+            gif = imported["animated"]
+            red = imported["red"]
+            blue = imported["blue"]
+
+            save_spray_configuration(root, gif["id"], {"mode": "static", "frame": 1})
+            static_result = apply_spray_collection(root, build_catalog(root), {"1": gif["id"]})
+            static_vtf = read_vpk_file(root / static_result["vpk"], "materials/vgui/logos/1.vtf")
+            self.assertEqual(struct.unpack_from("<H", static_vtf, 24)[0], 1)
+
+            save_spray_configuration(root, gif["id"], {"mode": "dynamic", "source": "gif", "frameDurationMs": 100})
+            dynamic_result = apply_spray_collection(root, build_catalog(root), {"2": gif["id"]})
+            dynamic_vtf = read_vpk_file(root / dynamic_result["vpk"], "materials/vgui/logos/2.vtf")
+            dynamic_vmt = read_vpk_file(root / dynamic_result["vpk"], "materials/vgui/logos/2.vmt").decode("ascii")
+            self.assertEqual(struct.unpack_from("<H", dynamic_vtf, 24)[0], 2)
+            self.assertIn('"UnlitGeneric"', dynamic_vmt)
+
+            save_spray_configuration(
+                root,
+                red["id"],
+                {
+                    "mode": "dynamic",
+                    "source": "images",
+                    "frames": [
+                        {"assetId": red["id"], "durationMs": 500},
+                        {"assetId": blue["id"], "durationMs": 500},
+                        {"assetId": gif["id"], "frame": 0, "durationMs": 499},
+                    ],
+                },
+            )
+            stitched_result = apply_spray_collection(root, build_catalog(root), {"4": red["id"]})
+            stitched_vtf = read_vpk_file(root / stitched_result["vpk"], "materials/vgui/logos/4.vtf")
+            self.assertLessEqual(struct.unpack_from("<H", stitched_vtf, 24)[0], 16)
+
+            save_spray_configuration(
+                root,
+                red["id"],
+                {
+                    "mode": "gradient",
+                    "mipmaps": [
+                        {"assetId": red["id"]},
+                        {"assetId": blue["id"]},
+                        {"assetId": red["id"]},
+                        {"assetId": blue["id"]},
+                        {"assetId": red["id"]},
+                    ],
+                },
+            )
+            gradient_result = apply_spray_collection(root, build_catalog(root), {"3": red["id"]})
+            gradient_vtf = read_vpk_file(root / gradient_result["vpk"], "materials/vgui/logos/3.vtf")
+            self.assertEqual(struct.unpack_from("<HH", gradient_vtf, 16), (512, 512))
+            self.assertEqual(struct.unpack_from("<H", gradient_vtf, 24)[0], 1)
+            self.assertEqual(struct.unpack_from("<I", gradient_vtf, 20)[0], 0x220C)
+            self.assertEqual(gradient_vtf[56], 5)
+            self.assertEqual(gradient_vtf[63], 1)
+
+    def test_imported_spray_can_be_deleted_and_unassigned(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_buffer = io.BytesIO()
+            Image.new("RGBA", (2, 2), (0, 255, 0, 255)).save(image_buffer, format="PNG")
+            import_spray_images(
+                root,
+                [{"name": "待删除.png", "data": base64.b64encode(image_buffer.getvalue()).decode("ascii")}],
+            )
+            asset = next(item for item in list_spray_assets(root, build_catalog(root))["assets"] if item["sourceType"] == "imported")
+            apply_spray_collection(root, build_catalog(root), {"3": asset["id"]})
+
+            result = delete_imported_spray(root, asset["id"])
+
+            self.assertEqual(result["clearedSlots"], ["3"])
+            self.assertFalse((root / asset["importedPath"]).exists())
+            self.assertEqual(list_spray_assets(root, build_catalog(root))["assignments"], {})
+
+    def test_decode_dxt5_block(self):
+        alpha_block = bytes([255, 0]) + (0).to_bytes(6, "little")
+        color_block = struct.pack("<HHI", 0xF800, 0x0000, 0)
+        pixels = _decode_dxt5(alpha_block + color_block, 4, 4)
+        self.assertEqual(pixels, bytes([255, 0, 0, 255]) * 16)
 
     def test_server_rename_and_delete_actions(self):
         with tempfile.TemporaryDirectory() as temp_dir:

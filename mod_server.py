@@ -23,7 +23,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 from ctypes import wintypes
 
+from folder_picker import choose_folder
+
 from mod_catalog import (
+    IMAGE_EXTENSIONS,
     VPK_EXTENSIONS,
     build_catalog,
     _key,
@@ -36,7 +39,19 @@ from mod_catalog import (
     save_custom_names,
     save_custom_tags,
 )
-from nekovpk import convert_nekovpk_target
+from nekovpk import convert_nekovpk_target, map_nekovpk_target
+from spray_manager import (
+    SprayError,
+    apply_spray_collection,
+    delete_imported_spray,
+    import_spray_images,
+    list_spray_assets,
+    save_spray_configuration,
+    reset_spray_state,
+    spray_preview_asset,
+    spray_preview_frame,
+)
+from manager_storage import ensure_manager_data_layout
 from voice_replacement import (
     VoiceReplacementConflict,
     VoiceReplacementError,
@@ -62,6 +77,18 @@ DEFAULT_AI_PROMPT = (
     "4. 不确定的地方。不要把文件名猜测当成确定事实，也不要编造不存在的内容。"
     "如果只有脚本、界面或材质路径，请解释它们可能的用途。"
 )
+
+
+def resource_root() -> Path:
+    """Return the directory containing bundled web resources or source files."""
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    return Path(bundle_root).resolve() if bundle_root else Path(__file__).parent.resolve()
+
+
+def log(message: str) -> None:
+    """Write diagnostics when a console is available."""
+    if sys.stdout is not None:
+        print(message)
 
 
 def source_version(root: Path) -> str:
@@ -336,6 +363,95 @@ def _relative_name(root: Path, path: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
+def scan_workshop_mods(root: Path) -> dict:
+    """Find Workshop VPKs that are not already copied into the workspace."""
+    workshop_root = (root / "workshop").resolve()
+    if not workshop_root.is_dir():
+        return {"available": False, "path": str(workshop_root), "mods": []}
+
+    existing_names = {
+        path.name.casefold()
+        for path in root.rglob("*")
+        if path.is_file()
+        and workshop_root not in path.resolve().parents
+    }
+    mods: list[dict] = []
+    source_vpks = sorted(
+        path
+        for path in workshop_root.rglob("*")
+        if path.is_file()
+        and path.suffix.casefold() in VPK_EXTENSIONS
+        and workshop_root in path.resolve().parents
+    )
+    for vpk_path in source_vpks:
+        target_names = {vpk_path.name.casefold()}
+        if vpk_path.suffix.casefold() == ".vpk":
+            target_names.add(vpk_path.with_suffix(".vpk1").name.casefold())
+        if target_names & existing_names:
+            continue
+        siblings = sorted(
+            path
+            for path in vpk_path.parent.iterdir()
+            if path.is_file()
+            and path.stem.casefold() == vpk_path.stem.casefold()
+            and path.suffix.casefold() in IMAGE_EXTENSIONS
+        )
+        source_files = [vpk_path, *siblings]
+        relative_vpk = _relative_name(workshop_root, vpk_path)
+        mods.append(
+            {
+                "id": relative_vpk,
+                "name": vpk_path.stem,
+                "vpkCount": 1,
+                "previewCount": len(siblings),
+                "files": [
+                    {
+                        "path": _relative_name(root, path),
+                        "name": path.name,
+                        "kind": "vpk" if path.suffix.casefold() in VPK_EXTENSIONS else "preview",
+                        "size": path.stat().st_size,
+                    }
+                    for path in source_files
+                ],
+            }
+        )
+    return {"available": True, "path": str(workshop_root), "mods": mods}
+
+
+def copy_workshop_mods(root: Path, mod_ids: list[str]) -> dict:
+    scan = scan_workshop_mods(root)
+    by_id = {item["id"]: item for item in scan["mods"]}
+    imported: list[str] = []
+    skipped: list[str] = []
+    conflicts: list[str] = []
+    missing: list[str] = [mod_id for mod_id in mod_ids if mod_id not in by_id]
+    workshop_root = (root / "workshop").resolve()
+    for mod_id in dict.fromkeys(mod_ids):
+        mod = by_id.get(mod_id)
+        if not mod:
+            continue
+        for item in mod["files"]:
+            source = _safe_path(root, item["path"])
+            if workshop_root not in source.resolve().parents or not source.is_file():
+                missing.append(item["path"])
+                continue
+            target = (root / source.name).resolve()
+            if target.exists():
+                if file_sha256(source) == file_sha256(target):
+                    skipped.append(item["name"])
+                else:
+                    conflicts.append(item["name"])
+                continue
+            shutil.copy2(source, target)
+            imported.append(item["name"])
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "conflicts": conflicts,
+        "missing": missing,
+    }
+
+
 def _extract_zip(archive: Path, root: Path) -> tuple[list[str], list[str]]:
     imported: list[str] = []
     conflicts: list[str] = []
@@ -391,6 +507,30 @@ def extract_archive(archive: Path, root: Path) -> dict:
 def _find_mod(root: Path, mod_id: str, catalog: list[dict] | None = None) -> dict | None:
     catalog = catalog if catalog is not None else build_catalog(root)
     return next((mod for mod in catalog if mod["id"] == mod_id), None)
+
+
+def _update_cached_vpk_states(catalog: list[dict], disabled_paths: list[str]) -> None:
+    """Reflect VPK renames in the cached catalog without rescanning contents."""
+
+    disabled = {
+        str(path).replace("\\", "/").casefold()
+        for path in disabled_paths
+    }
+    for mod in catalog:
+        updated_files = []
+        changed = False
+        for relative in mod.get("vpkFiles", []):
+            normalized = str(relative).replace("\\", "/")
+            if normalized.casefold() in disabled and Path(normalized).suffix.casefold() == ".vpk":
+                normalized = f"{normalized[:-4]}.vpk1"
+                changed = True
+            updated_files.append(normalized)
+        if not changed:
+            continue
+        mod["vpkFiles"] = updated_files
+        states = {Path(path).suffix.casefold() == ".vpk" for path in updated_files}
+        mod["enabled"] = states == {True}
+        mod["partiallyEnabled"] = len(states) > 1
 
 
 def _validate_mod_name(name: str) -> str:
@@ -602,7 +742,9 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
     root: Path
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=str(Path(__file__).parent.resolve()), **kwargs)
+        server = args[2] if len(args) > 2 else kwargs.get("server")
+        static_root = getattr(server, "static_root", resource_root())
+        super().__init__(*args, directory=str(static_root), **kwargs)
 
     @property
     def mod_root(self) -> Path:
@@ -613,6 +755,7 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
         return getattr(self.server, "static_root", Path(__file__).parent.resolve())
 
     def _catalog(self, refresh: bool = False) -> list[dict]:
+        ensure_manager_data_layout(self.mod_root)
         cached = getattr(self.server, "catalog_cache", None)
         if refresh or cached is None:
             cached = build_catalog(self.mod_root)
@@ -631,6 +774,14 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
 
     def _invalidate_catalog(self) -> None:
         self.server.catalog_cache = None
+        self.server.spray_assets_cache = None
+
+    def _spray_index(self, refresh: bool = False) -> dict:
+        cached = getattr(self.server, "spray_assets_cache", None)
+        if refresh or cached is None:
+            cached = list_spray_assets(self.mod_root, self._catalog(refresh=refresh))
+            self.server.spray_assets_cache = cached
+        return cached
 
     def _sync_cached_mod_tags(self) -> None:
         """Update tag fields in the existing catalog without rescanning VPKs."""
@@ -745,6 +896,44 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
             except VoiceReplacementError as error:
                 self._send_json(400, {"error": str(error)})
             return
+        if request_path == "/api/spray/assets":
+            try:
+                refresh = "refresh" in parse_qs(urlsplit(self.path).query)
+                self._send_json(200, self._spray_index(refresh=refresh))
+            except SprayError as error:
+                self._send_json(400, {"error": str(error)})
+            return
+        if request_path == "/api/spray/preview":
+            query = parse_qs(urlsplit(self.path).query)
+            asset_id = query.get("asset", [""])[0]
+            try:
+                asset = next(
+                    (item for item in self._spray_index().get("assets", []) if item.get("id") == asset_id),
+                    None,
+                )
+                if asset is None:
+                    raise SprayError("找不到这个喷漆资源，请先刷新喷漆列表")
+                frame_value = query.get("frame", [None])[0]
+                if frame_value is not None and asset.get("sourceType") == "imported":
+                    content = spray_preview_frame(self.mod_root, asset, int(frame_value))
+                else:
+                    content = spray_preview_asset(self.mod_root, asset)
+            except SprayError as error:
+                self._send_json(400, {"error": str(error)})
+                return
+            except ValueError:
+                self._send_json(400, {"error": "预览帧编号无效"})
+                return
+            self.send_response(200)
+            content_type = "image/gif" if asset.get("sourceType") == "imported" and str(asset.get("filename", "")).casefold().endswith(".gif") else "image/png"
+            if frame_value is not None:
+                content_type = "image/png"
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+            return
         if request_path == "/api/catalog":
             refresh = "refresh" in parse_qs(urlsplit(self.path).query)
             payload = json.dumps(
@@ -760,6 +949,9 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+            return
+        if request_path == "/api/workshop/scan":
+            self._send_json(200, scan_workshop_mods(self.mod_root))
             return
         if request_path.startswith("/files/"):
             self._serve_mod_file(request_path)
@@ -928,6 +1120,63 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
                 self._send_json(200, {"ok": True, "id": mod_id, "enabled": enabled, "renamed": renamed})
                 return
 
+            if route == "/api/spray/apply":
+                payload = self._read_json()
+                assignments = payload.get("assignments")
+                if not isinstance(assignments, dict):
+                    raise ValueError("喷漆槽位配置无效")
+                catalog = self._catalog()
+                result = apply_spray_collection(
+                    self.mod_root,
+                    catalog,
+                    assignments,
+                    toggle_callback=toggle_mod_enabled,
+                )
+                _update_cached_vpk_states(catalog, result.get("disabledVpkFiles", []))
+                self.server.catalog_cache = catalog
+                self.server.spray_assets_cache = None
+                self._send_json(200, {"ok": True, **result})
+                return
+
+            if route == "/api/spray/import":
+                payload = self._read_json()
+                result = import_spray_images(self.mod_root, payload.get("images"))
+                self._invalidate_catalog()
+                self._send_json(200, {"ok": True, **result})
+                return
+
+            if route == "/api/spray/config":
+                payload = self._read_json()
+                asset_id = str(payload.get("assetId", "")).strip()
+                if not asset_id:
+                    raise ValueError("缺少喷漆素材")
+                result = save_spray_configuration(
+                    self.mod_root,
+                    asset_id,
+                    payload.get("configuration"),
+                )
+                self.server.spray_assets_cache = None
+                self._send_json(200, {"ok": True, **result})
+                return
+
+            if route == "/api/spray/delete":
+                payload = self._read_json()
+                asset_id = str(payload.get("assetId", "")).strip()
+                result = delete_imported_spray(
+                    self.mod_root,
+                    asset_id,
+                    recycle_callback=move_to_recycle_bin,
+                )
+                self._invalidate_catalog()
+                self._send_json(200, {"ok": True, **result})
+                return
+
+            if route == "/api/spray/reset":
+                reset_spray_state(self.mod_root)
+                self._invalidate_catalog()
+                self._send_json(200, {"ok": True})
+                return
+
             if route == "/api/mod/nekovpk/convert":
                 payload = self._read_json()
                 mod_id = str(payload.get("id", ""))
@@ -944,6 +1193,36 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
                     raise ValueError("NekoVPK 文件已发生变化，请刷新目录后重试")
                 vpk_path = _safe_path(self.mod_root, relative_path)
                 result = convert_nekovpk_target(vpk_path, target)
+                self._invalidate_catalog()
+                refreshed = self._catalog(refresh=True)
+                updated = _find_mod(self.mod_root, mod_id, refreshed)
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "id": mod_id,
+                        "result": result,
+                        "nekovpk": updated.get("nekovpk") if updated else None,
+                    },
+                )
+                return
+
+            if route == "/api/mod/nekovpk/map":
+                payload = self._read_json()
+                mod_id = str(payload.get("id", ""))
+                target = str(payload.get("target", "")).strip().casefold()
+                mod = _find_mod(self.mod_root, mod_id, self._catalog())
+                if not mod:
+                    self._send_json(404, {"error": "找不到这个 Mod"})
+                    return
+                info = mod.get("nekovpk")
+                if not isinstance(info, dict) or not info.get("vpkPath"):
+                    raise ValueError("这个 Mod 不是可配置的 NekoVPK")
+                relative_path = str(info["vpkPath"])
+                if relative_path not in mod.get("vpkFiles", []):
+                    raise ValueError("NekoVPK 文件已发生变化，请刷新目录后重试")
+                vpk_path = _safe_path(self.mod_root, relative_path)
+                result = map_nekovpk_target(vpk_path, target)
                 self._invalidate_catalog()
                 refreshed = self._catalog(refresh=True)
                 updated = _find_mod(self.mod_root, mod_id, refreshed)
@@ -1205,15 +1484,7 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
                 return
 
             if route == "/api/select-folder":
-                picker = Path(__file__).with_name("folder_picker.py")
-                completed = subprocess.run(
-                    [sys.executable, str(picker)],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-                selected = completed.stdout.strip()
+                selected = choose_folder()
                 if not selected:
                     self._send_json(200, {"ok": False, "cancelled": True})
                     return
@@ -1263,6 +1534,17 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
                 self._send_json(200, {"ok": True, **result})
                 return
 
+            if route == "/api/workshop/import":
+                payload = self._read_json()
+                raw_ids = payload.get("ids", [])
+                if not isinstance(raw_ids, list) or not raw_ids:
+                    raise ValueError("请至少选择一个 Workshop Mod")
+                ids = list(dict.fromkeys(str(mod_id) for mod_id in raw_ids if str(mod_id)))
+                result = copy_workshop_mods(self.mod_root, ids)
+                self._invalidate_catalog()
+                self._send_json(200, {"ok": True, **result})
+                return
+
             self._send_json(404, {"error": "未知操作"})
         except VoiceReplacementConflict as error:
             self._send_json(409, {"error": str(error), "conflicts": error.conflicts})
@@ -1270,26 +1552,31 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
             self._send_json(400, {"error": str(error)})
 
 
+def run_server(root: Path, port: int = 8765, static_root: Path | None = None) -> None:
+    root = root.resolve()
+    handler = type("ConfiguredModRequestHandler", (ModRequestHandler,), {"root": root})
+    server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    server.mod_root = root
+    server.static_root = (static_root or resource_root()).resolve()
+    server.catalog_cache = None
+    server.spray_assets_cache = None
+    log(f"Mod catalog: http://127.0.0.1:{port}/")
+    log(f"Scanning: {root}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        log("\nStopping Mod catalog")
+    finally:
+        server.server_close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the local L4D2 Mod catalog")
     parser.add_argument("folder", nargs="?", type=Path, default=None)
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
-
-    root = (args.folder.resolve() if args.folder else load_last_folder(Path.cwd().resolve()))
-    handler = type("ConfiguredModRequestHandler", (ModRequestHandler,), {"root": root})
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
-    server.mod_root = root
-    server.static_root = Path(__file__).parent.resolve()
-    server.catalog_cache = None
-    print(f"Mod catalog: http://127.0.0.1:{args.port}/")
-    print(f"Scanning: {root}")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nStopping Mod catalog")
-    finally:
-        server.server_close()
+    root = args.folder.resolve() if args.folder else load_last_folder(Path.cwd().resolve())
+    run_server(root, args.port)
 
 
 if __name__ == "__main__":

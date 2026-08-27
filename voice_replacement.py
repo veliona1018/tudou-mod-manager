@@ -10,16 +10,17 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import uuid
 
 from nekovpk import read_vpk_entries
-from vpk_detector import read_vpk_paths
+from vpk_detector import read_vpk_file, read_vpk_paths
+from manager_storage import VOICE_BACKUP_DIR, ensure_manager_data_layout, migrate_voice_backup_path
 
 
 VOICE_PREFIX = "sound/player/survivor/voice/"
 VOICE_STATE_KEY = "voiceInstallations"
-VOICE_BACKUP_DIR = ".l4d2_voice_backups"
 VPK_SUFFIXES = {".vpk", ".vpk1"}
 
 VOICE_ROLES = {
@@ -69,12 +70,28 @@ def _save_metadata(mod_root: Path, payload: dict) -> None:
 
 
 def load_voice_installations(mod_root: str | Path) -> list[dict]:
-    records = _read_metadata(Path(mod_root).resolve()).get(VOICE_STATE_KEY, [])
-    return [record for record in records if isinstance(record, dict) and record.get("id")]
+    root = Path(mod_root).resolve()
+    ensure_manager_data_layout(root)
+    records = _read_metadata(root).get(VOICE_STATE_KEY, [])
+    normalized = []
+    changed = False
+    for record in records:
+        if not isinstance(record, dict) or not record.get("id"):
+            continue
+        updated = dict(record)
+        backup_dir = migrate_voice_backup_path(str(updated.get("backupDir", "")))
+        if backup_dir != updated.get("backupDir"):
+            updated["backupDir"] = backup_dir
+            changed = True
+        normalized.append(updated)
+    if changed:
+        save_voice_installations(root, normalized)
+    return normalized
 
 
 def save_voice_installations(mod_root: str | Path, records: list[dict]) -> None:
     root = Path(mod_root).resolve()
+    ensure_manager_data_layout(root)
     payload = _read_metadata(root)
     payload[VOICE_STATE_KEY] = records
     _save_metadata(root, payload)
@@ -119,6 +136,33 @@ def _group_voice_paths(paths: list[str]) -> dict[str, list[str]]:
         if role in VOICE_ROLES:
             grouped.setdefault(role, []).append(path)
     return grouped
+
+
+def detect_voice_roles(paths: list[str]) -> list[dict]:
+    """Return survivor roles represented by voice paths in a VPK."""
+
+    grouped = _group_voice_paths(paths)
+    return [
+        {"id": role, "name": VOICE_ROLES[role], "fileCount": len(grouped[role])}
+        for role in VOICE_ROLES
+        if role in grouped
+    ]
+
+
+def detect_voice_replacement_mode(file_path: str | Path, paths: list[str] | None = None) -> str | None:
+    """Classify a voice VPK as a direct addon or an external install package."""
+    paths = paths if paths is not None else read_vpk_paths(file_path)
+    if not any(path.startswith(VOICE_PREFIX) and path.endswith(".wav") for path in paths):
+        return None
+    if any(Path(path).suffix.casefold() in {".bat", ".cmd"} for path in paths):
+        return "manual"
+    addoninfo = read_vpk_file(file_path, "addoninfo.txt") or b""
+    text = addoninfo.decode("utf-8", errors="replace").lstrip().casefold()
+    if text.startswith("@echo off") or re.search(
+        r"(?m)^\s*(?:set|if\s+exist|goto|copy|xcopy|robocopy|chcp)\b", text
+    ):
+        return "manual"
+    return "automatic"
 
 
 def _role_game_roots(game_parent: Path, role: str) -> list[tuple[str, Path]]:
@@ -166,6 +210,34 @@ def _target_plan(game_parent: Path, role: str, source_paths: list[str]) -> dict:
     }
 
 
+def _planned_target_paths(roles: list[dict], grouped: dict[str, list[str]]) -> set[str]:
+    targets: set[str] = set()
+    for role in roles:
+        source_paths = grouped.get(role["id"], [])
+        for directory in role.get("targetDirectories", []):
+            for source_path in source_paths:
+                filename = source_path.rsplit("/", 1)[-1]
+                targets.add(f"{directory['path']}/{filename}".replace("\\", "/").casefold())
+    return targets
+
+
+def _record_target_paths(record: dict) -> set[str]:
+    return {
+        str(item.get("target", "")).replace("\\", "/").lstrip("./").casefold()
+        for item in record.get("files", [])
+        if item.get("target")
+    }
+
+
+def _find_voice_installation_conflicts(records: list[dict], target_paths: set[str]) -> list[dict]:
+    conflicts = []
+    for record in records:
+        record_paths = _record_target_paths(record)
+        if not record_paths or record_paths & target_paths:
+            conflicts.append(record)
+    return conflicts
+
+
 def _find_voice_vpk(mod_root: Path, mod: dict) -> Path:
     candidates = [
         _safe_relative(mod_root, relative)
@@ -184,6 +256,7 @@ def inspect_voice_package(mod_root: str | Path, mod: dict) -> dict:
     """Return a no-write installation preview for a voice replacement Mod."""
 
     root = Path(mod_root).resolve()
+    ensure_manager_data_layout(root)
     vpk_path = _find_voice_vpk(root, mod)
     game_parent = _game_parent(root)
     grouped = _group_voice_paths(_voice_paths(vpk_path))
@@ -191,6 +264,7 @@ def inspect_voice_package(mod_root: str | Path, mod: dict) -> dict:
     installations = load_voice_installations(root)
     current = next((item for item in installations if item.get("modId") == mod.get("id")), None)
     other = [item for item in installations if item.get("modId") != mod.get("id")]
+    target_paths = _planned_target_paths(roles, grouped)
     return {
         "format": "voice_replacement",
         "vpkPath": vpk_path.relative_to(root).as_posix(),
@@ -206,7 +280,7 @@ def inspect_voice_package(mod_root: str | Path, mod: dict) -> dict:
         ],
         "conflicts": [
             {"id": item.get("id"), "modId": item.get("modId"), "modName": item.get("modName")}
-            for item in other
+            for item in _find_voice_installation_conflicts(other, target_paths)
         ],
     }
 
@@ -279,6 +353,7 @@ def _restore_partial(game_parent: Path, record: dict, written: list[dict], backu
 
 def restore_voice_package(mod_root: str | Path, mod_id: str) -> dict:
     root = Path(mod_root).resolve()
+    ensure_manager_data_layout(root)
     records = load_voice_installations(root)
     record = next((item for item in records if item.get("modId") == mod_id), None)
     if not record:
@@ -297,6 +372,7 @@ def install_voice_package(
     """Install a voice package with backups and rollback on failure."""
 
     root = Path(mod_root).resolve()
+    ensure_manager_data_layout(root)
     vpk_path = _find_voice_vpk(root, mod)
     game_parent = _game_parent(root)
     grouped = _group_voice_paths(_voice_paths(vpk_path))
@@ -306,7 +382,11 @@ def install_voice_package(
         raise VoiceReplacementError("没有找到可安装的游戏语音目录")
 
     records = load_voice_installations(root)
-    conflicts = [item for item in records if item.get("modId") != mod.get("id")]
+    target_paths = _planned_target_paths(plans, grouped)
+    conflicts = _find_voice_installation_conflicts(
+        [item for item in records if item.get("modId") != mod.get("id")],
+        target_paths,
+    )
     if conflicts and not replace_existing:
         raise VoiceReplacementConflict(conflicts)
     if any(item.get("modId") == mod.get("id") for item in records):
