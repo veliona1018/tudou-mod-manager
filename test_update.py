@@ -4,7 +4,14 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from mod_server import UpdateError, _find_update_executable, _version_key, update_info
+from mod_server import (
+    UpdateError,
+    _find_update_executable,
+    _select_update_asset,
+    _validate_direct_executable,
+    _version_key,
+    update_info,
+)
 
 
 class UpdateTests(unittest.TestCase):
@@ -28,6 +35,27 @@ class UpdateTests(unittest.TestCase):
             result = update_info()
         self.assertTrue(result["updateAvailable"])
         self.assertEqual(result["latestVersion"], "0.3")
+
+    def test_update_asset_prefers_manager_executable(self):
+        assets = [
+            {"name": "TudouManager-v0.3.exe", "browser_download_url": "https://github.com/example/release.exe"},
+            {"name": "source.zip", "browser_download_url": "https://github.com/example/source.zip"},
+        ]
+        self.assertEqual(_select_update_asset(assets)["name"], "TudouManager-v0.3.exe")
+
+    def test_update_asset_falls_back_to_zip(self):
+        assets = [{"name": "TudouManager-v0.3.zip", "browser_download_url": "https://github.com/example/update.zip"}]
+        self.assertEqual(_select_update_asset(assets)["name"], "TudouManager-v0.3.zip")
+
+    def test_direct_executable_requires_pe_header(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary) / "update.exe"
+            package.write_bytes(b"MZplaceholder")
+            _validate_direct_executable(package)
+
+            package.write_bytes(b"not an exe")
+            with self.assertRaises(UpdateError):
+                _validate_direct_executable(package)
 
     def test_update_archive_requires_a_manager_executable(self):
         with tempfile.TemporaryDirectory() as temporary:

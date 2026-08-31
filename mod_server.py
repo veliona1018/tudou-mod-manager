@@ -91,6 +91,7 @@ DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_MODELS = {"deepseek-chat", "deepseek-reasoner"}
 GITHUB_RELEASE_API_URL = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
+UPDATE_ASSET_EXTENSIONS = {".exe", ".zip"}
 DEFAULT_AI_PROMPT = (
     "请分析这个求生之路 2（Left 4 Dead 2）Mod。根据提供的 VPK 内部路径和检测证据，"
     "用简体中文说明：1. 它大概是什么；2. 可能替换或影响什么内容；3. 判断依据；"
@@ -108,6 +109,48 @@ def _version_key(value: str) -> tuple[int, int, int]:
     if not match:
         raise UpdateError(f"GitHub 返回了无法识别的版本号：{value}")
     return tuple(int(part or 0) for part in match.groups())
+
+
+def _select_update_asset(assets: object) -> dict:
+    if not isinstance(assets, list):
+        assets = []
+    candidates = [
+        item
+        for item in assets
+        if isinstance(item, dict)
+        and Path(str(item.get("name", ""))).suffix.casefold() in UPDATE_ASSET_EXTENSIONS
+        and str(item.get("browser_download_url", "")).startswith("https://github.com/")
+    ]
+    executable_assets = [
+        item for item in candidates if Path(str(item.get("name", ""))).suffix.casefold() == ".exe"
+    ]
+    if executable_assets:
+        manager_assets = [
+            item
+            for item in executable_assets
+            if any(marker in str(item.get("name", "")).casefold() for marker in ("tudou", "土豆"))
+        ]
+        if len(manager_assets) == 1:
+            return manager_assets[0]
+        if len(executable_assets) == 1:
+            return executable_assets[0]
+        raise UpdateError("最新 Release 包含多个无法区分的 EXE 更新文件")
+
+    archive_assets = [
+        item for item in candidates if Path(str(item.get("name", ""))).suffix.casefold() == ".zip"
+    ]
+    manager_archives = [
+        item
+        for item in archive_assets
+        if any(marker in str(item.get("name", "")).casefold() for marker in ("tudou", "土豆"))
+    ]
+    if len(manager_archives) == 1:
+        return manager_archives[0]
+    if len(archive_assets) == 1:
+        return archive_assets[0]
+    if not candidates:
+        raise UpdateError("最新 Release 没有可用的 EXE 或 ZIP 更新文件")
+    raise UpdateError("最新 Release 包含多个无法区分的 ZIP 更新文件")
 
 
 def _latest_release() -> dict:
@@ -129,20 +172,7 @@ def _latest_release() -> dict:
     tag = str(payload.get("tag_name", "")).strip()
     if not tag:
         raise UpdateError("GitHub Release 缺少版本号")
-    assets = payload.get("assets")
-    if not isinstance(assets, list):
-        assets = []
-    asset = next(
-        (
-            item for item in assets
-            if isinstance(item, dict)
-            and str(item.get("name", "")).casefold().endswith(".zip")
-            and str(item.get("browser_download_url", "")).startswith("https://github.com/")
-        ),
-        None,
-    )
-    if not asset:
-        raise UpdateError("最新 Release 没有可用的 ZIP 更新包")
+    asset = _select_update_asset(payload.get("assets"))
     try:
         version = _version_key(tag)
     except UpdateError:
@@ -160,6 +190,7 @@ def _latest_release() -> dict:
         "assetName": str(asset.get("name", "")).strip(),
         "assetUrl": str(asset.get("browser_download_url", "")).strip(),
         "assetSize": int(asset.get("size", 0) or 0),
+        "assetType": Path(str(asset.get("name", ""))).suffix.casefold().removeprefix("."),
         "digest": digest.removeprefix("sha256:"),
     }
 
@@ -217,7 +248,10 @@ def save_navigation_order(order: object) -> None:
 def _download_update(release: dict, target: Path) -> Path:
     update_dir = settings_path().parent / "updates"
     update_dir.mkdir(parents=True, exist_ok=True)
-    archive = update_dir / f"download-{uuid.uuid4().hex}.zip"
+    suffix = Path(str(release.get("assetName", ""))).suffix.casefold()
+    if suffix not in UPDATE_ASSET_EXTENSIONS:
+        raise UpdateError("更新文件格式不受支持")
+    package = update_dir / f"download-{uuid.uuid4().hex}{suffix}"
     request = urllib.request.Request(
         release["assetUrl"],
         headers={
@@ -228,7 +262,7 @@ def _download_update(release: dict, target: Path) -> Path:
     digest = hashlib.sha256()
     total = 0
     try:
-        with urllib.request.urlopen(request, timeout=60) as response, archive.open("wb") as destination:
+        with urllib.request.urlopen(request, timeout=60) as response, package.open("wb") as destination:
             while True:
                 chunk = response.read(1024 * 1024)
                 if not chunk:
@@ -239,21 +273,33 @@ def _download_update(release: dict, target: Path) -> Path:
                 digest.update(chunk)
                 destination.write(chunk)
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as error:
-        archive.unlink(missing_ok=True)
+        package.unlink(missing_ok=True)
         raise UpdateError(f"下载更新包失败：{error}") from error
     if release.get("assetSize") and total != release["assetSize"]:
-        archive.unlink(missing_ok=True)
+        package.unlink(missing_ok=True)
         raise UpdateError("更新包大小校验失败")
     expected = str(release.get("digest", "")).casefold()
     if expected and digest.hexdigest().casefold() != expected:
-        archive.unlink(missing_ok=True)
+        package.unlink(missing_ok=True)
         raise UpdateError("更新包 SHA-256 校验失败，已取消更新")
     try:
-        _find_update_executable(archive, target.name)
+        if suffix == ".zip":
+            _find_update_executable(package, target.name)
+        else:
+            _validate_direct_executable(package)
     except UpdateError:
-        archive.unlink(missing_ok=True)
+        package.unlink(missing_ok=True)
         raise
-    return archive
+    return package
+
+
+def _validate_direct_executable(package: Path) -> None:
+    try:
+        with package.open("rb") as source:
+            if source.read(2) != b"MZ":
+                raise UpdateError("更新文件不是有效的 EXE 程序")
+    except OSError as error:
+        raise UpdateError(f"无法读取 EXE 更新文件：{error}") from error
 
 
 def _find_update_executable(archive: Path, target_name: str) -> str:
@@ -285,7 +331,7 @@ def _write_update_script(script: Path) -> None:
     script.write_text(
         """param(
   [Parameter(Mandatory=$true)][int]$WaitPid,
-  [Parameter(Mandatory=$true)][string]$ArchivePath,
+  [Parameter(Mandatory=$true)][string]$PackagePath,
   [Parameter(Mandatory=$true)][string]$TargetPath,
   [Parameter(Mandatory=$true)][string]$SourceName,
   [Parameter(Mandatory=$true)][string]$ScriptPath
@@ -297,8 +343,12 @@ try {
   $deadline = (Get-Date).AddSeconds(60)
   while ((Get-Process -Id $WaitPid -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
   if (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue) { throw '管理器进程未能正常退出' }
-  Expand-Archive -LiteralPath $ArchivePath -DestinationPath $stage -Force
-  $source = Get-ChildItem -LiteralPath $stage -Recurse -File | Where-Object { $_.Name -ieq $SourceName } | Select-Object -First 1
+  if ([IO.Path]::GetExtension($PackagePath) -ieq '.exe') {
+    $source = Get-Item -LiteralPath $PackagePath
+  } else {
+    Expand-Archive -LiteralPath $PackagePath -DestinationPath $stage -Force
+    $source = Get-ChildItem -LiteralPath $stage -Recurse -File | Where-Object { $_.Name -ieq $SourceName } | Select-Object -First 1
+  }
   if (-not $source) { throw '更新包中找不到管理器程序' }
   if (Test-Path -LiteralPath $TargetPath) { Copy-Item -LiteralPath $TargetPath -Destination ($TargetPath + '.previous') -Force }
   for ($attempt = 0; $attempt -lt 20; $attempt++) {
@@ -311,7 +361,7 @@ try {
   exit 1
 } finally {
   if ($updated) {
-    Remove-Item -LiteralPath $ArchivePath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $PackagePath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $ScriptPath -Force -ErrorAction SilentlyContinue
   }
@@ -328,8 +378,10 @@ def schedule_update() -> dict:
     release = _latest_release()
     if release["versionKey"] <= _version_key(APP_VERSION):
         return {"currentVersion": APP_VERSION, "latestVersion": release["version"], "restartScheduled": False}
-    archive = _download_update(release, target)
-    source_name = Path(_find_update_executable(archive, target.name)).name
+    package = _download_update(release, target)
+    source_name = target.name
+    if package.suffix.casefold() == ".zip":
+        source_name = Path(_find_update_executable(package, target.name)).name
     script = settings_path().parent / f"update-{uuid.uuid4().hex}.ps1"
     try:
         _write_update_script(script)
@@ -346,8 +398,8 @@ def schedule_update() -> dict:
                 str(script),
                 "-WaitPid",
                 str(os.getppid()),
-                "-ArchivePath",
-                str(archive),
+                "-PackagePath",
+                str(package),
                 "-TargetPath",
                 str(target),
                 "-SourceName",
@@ -361,7 +413,7 @@ def schedule_update() -> dict:
         )
     except (OSError, UpdateError):
         script.unlink(missing_ok=True)
-        archive.unlink(missing_ok=True)
+        package.unlink(missing_ok=True)
         raise
     return {
         "currentVersion": APP_VERSION,
