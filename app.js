@@ -39,6 +39,7 @@ const viewTitles = {
 const rootPath = document.querySelector("#root-path");
 const shell = document.querySelector(".shell");
 const sidebarToggleButton = document.querySelector("#settings-button");
+const launchGameButton = document.querySelector("#launch-game-button");
 const grid = document.querySelector("#mod-grid");
 const notice = document.querySelector("#notice");
 const operationOverlay = document.querySelector("#operation-overlay");
@@ -2107,6 +2108,18 @@ async function loadCatalog(force = false) {
   }
 }
 
+async function launchGame() {
+  if (operationBusy) return;
+  return runExclusiveOperation("正在启动求生之路 2，请稍候…", async () => {
+    try {
+      const result = await postJson("/api/game/launch", {});
+      showNotice(result.mode === "direct" ? "已启动求生之路 2" : "已通过 Steam 启动求生之路 2", true);
+    } catch (error) {
+      showNotice(`启动游戏失败：${error.message}`);
+    }
+  });
+}
+
 async function changeFolder() {
   if (operationBusy) return;
   return runExclusiveOperation("正在更改 Mod 目录，请稍候…", () => changeFolderInner());
@@ -2365,6 +2378,7 @@ document.querySelector("#refresh-button").addEventListener("click", refreshCatal
 document.querySelector("#change-folder-button").addEventListener("click", changeFolder);
 document.querySelector("#reset-folder-button").addEventListener("click", resetFolder);
 document.querySelector("#refresh-button-top").addEventListener("click", refreshCatalog);
+launchGameButton.addEventListener("click", launchGame);
 document.querySelector("#spray-manager-button").addEventListener("click", openSprayManager);
 document.querySelector("#workshop-button").addEventListener("click", openWorkshopDialog);
 document.querySelector("#import-button").addEventListener("click", () => document.querySelector("#import-input").click());

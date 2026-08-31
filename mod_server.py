@@ -92,6 +92,8 @@ DEEPSEEK_MODELS = {"deepseek-chat", "deepseek-reasoner"}
 GITHUB_RELEASE_API_URL = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 UPDATE_ASSET_EXTENSIONS = {".exe", ".zip"}
+GAME_EXECUTABLE_NAME = "left4dead2.exe"
+GAME_STEAM_URI = "steam://rungameid/550"
 DEFAULT_AI_PROMPT = (
     "请分析这个求生之路 2（Left 4 Dead 2）Mod。根据提供的 VPK 内部路径和检测证据，"
     "用简体中文说明：1. 它大概是什么；2. 可能替换或影响什么内容；3. 判断依据；"
@@ -453,6 +455,58 @@ def source_version(root: Path) -> str:
 def settings_path() -> Path:
     local_app_data = Path(os.environ.get("LOCALAPPDATA", Path.cwd()))
     return local_app_data / "L4D2ModManager" / "settings.json"
+
+
+def find_game_executable(mod_root: Path) -> Path | None:
+    """Find the L4D2 executable in or above the configured addons directory."""
+    root = mod_root.resolve()
+    for base in (root, *root.parents):
+        candidate = base / GAME_EXECUTABLE_NAME
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def launch_game(mod_root: Path) -> dict:
+    """Launch the game associated with the current Mod directory."""
+    executable = find_game_executable(mod_root)
+    if executable:
+        try:
+            subprocess.Popen(
+                [str(executable)],
+                cwd=str(executable.parent),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+            )
+        except OSError as error:
+            raise ValueError(f"启动求生之路 2 失败：{error}") from error
+        return {"ok": True, "mode": "direct", "executable": str(executable)}
+
+    if os.name == "nt":
+        startfile = getattr(os, "startfile", None)
+        if startfile:
+            try:
+                startfile(GAME_STEAM_URI)
+            except OSError as error:
+                raise ValueError("找不到求生之路 2 的程序，且无法通过 Steam 启动") from error
+            return {"ok": True, "mode": "steam"}
+
+    steam = shutil.which("steam")
+    if steam:
+        try:
+            subprocess.Popen(
+                [steam, GAME_STEAM_URI],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as error:
+            raise ValueError(f"通过 Steam 启动求生之路 2 失败：{error}") from error
+        return {"ok": True, "mode": "steam"}
+
+    raise ValueError("找不到求生之路 2 的启动程序，请先选择正确的 addons 目录")
 
 
 def _read_settings() -> dict:
@@ -1505,6 +1559,10 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
 
             if route == "/api/update/install":
                 self._send_json(200, {"ok": True, **schedule_update()})
+                return
+
+            if route == "/api/game/launch":
+                self._send_json(200, launch_game(self.mod_root))
                 return
 
             if route == "/api/ai/config":

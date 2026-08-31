@@ -58,7 +58,7 @@ button { cursor: pointer; }
 .content { max-width: 1500px; width: 100%; padding: 34px 42px 56px; margin: 0 auto; }
 .topbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 22px; }
 h1 { margin: 7px 0 0; font-size: 31px; line-height: 1.1; letter-spacing: -.5px; }
-.top-actions { display: flex; gap: 10px; align-items: center; }
+.top-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: flex-end; }
 .search-box { width: min(300px, 34vw); height: 39px; display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); background: var(--panel); border-radius: 7px; padding: 0 10px; color: var(--faint); }
 .search-box svg { width: 16px; flex: 0 0 auto; }
 .search-box input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--text); }
