@@ -730,8 +730,9 @@ def _rewrite_vmt(content: bytes | None, slot: str) -> bytes:
     return value.encode("utf-8")
 
 
-def _dynamic_imported_spray_vmt(slot: str) -> bytes:
-    """Use the UnlitGeneric material used by working animated spray VTFs."""
+def _dynamic_imported_spray_vmt(slot: str, frame_rate: float = 10.0) -> bytes:
+    """Create the material proxy that advances a multi-frame spray texture."""
+    frame_rate_text = f"{max(0.2, min(50.0, frame_rate)):.6g}"
     return (
         '"UnlitGeneric"\n'
         '{\n'
@@ -741,6 +742,15 @@ def _dynamic_imported_spray_vmt(slot: str) -> bytes:
         '\t"$vertexalpha" 1\n'
         '\t"$no_fullbright" 1\n'
         '\t"$ignorez" 1\n'
+        '\t"Proxies"\n'
+        '\t{\n'
+        '\t\t"AnimatedTexture"\n'
+        '\t\t{\n'
+        '\t\t\t"animatedTextureVar" "$basetexture"\n'
+        '\t\t\t"animatedTextureFrameNumVar" "$frame"\n'
+        f'\t\t\t"animatedTextureFrameRate" "{frame_rate_text}"\n'
+        '\t\t}\n'
+        '\t}\n'
         '}\n'
     ).encode("ascii")
 
@@ -816,6 +826,11 @@ def _load_imported_gif_frames(path: Path) -> tuple[list, list[int]]:
 
 
 def _expand_timed_frames(frames: list, durations: list[int]) -> list:
+    expanded, _ = _expand_timed_frames_with_tick(frames, durations)
+    return expanded
+
+
+def _expand_timed_frames_with_tick(frames: list, durations: list[int]) -> tuple[list, int]:
     if not frames or len(frames) != len(durations):
         raise SprayError("动态喷漆帧数据不完整")
     tick = durations[0]
@@ -832,26 +847,32 @@ def _expand_timed_frames(frames: list, durations: list[int]) -> list:
         expanded.extend([frame] * repeat)
     if len(expanded) > MAX_SPRAY_VTF_FRAMES:
         expanded = expanded[:MAX_SPRAY_VTF_FRAMES]
-    return expanded
+    return expanded, tick
 
 
-def _configured_spray_frames(root: Path, configuration: dict) -> list:
+def _configured_spray_frame_data(root: Path, configuration: dict) -> tuple[list, int]:
+    """Return encoded frames and the millisecond tick used by the VMT proxy."""
     mode = configuration["mode"]
     if mode == "dynamic" and configuration.get("source") == "gif":
         asset = _imported_asset(root, configuration["assetId"])
         frames, _ = _load_imported_gif_frames((root / asset["importedPath"]).resolve())
         duration = configuration["frameDurationMs"]
-        return _expand_timed_frames(frames, [duration] * len(frames))
+        return _expand_timed_frames_with_tick(frames, [duration] * len(frames))
 
     def load_frame(item: dict):
         asset = _imported_asset(root, item["assetId"])
         return _load_imported_frame((root / asset["importedPath"]).resolve(), item["frame"])
 
     if mode == "dynamic":
-        frames = [load_frame(item) for item in configuration["frames"]]
-        durations = [item["durationMs"] for item in configuration["frames"]]
-        return _expand_timed_frames(frames, durations)
+        frame_items = configuration["frames"]
+        frames = [load_frame(item) for item in frame_items]
+        durations = [item["durationMs"] for item in frame_items]
+        return _expand_timed_frames_with_tick(frames, durations)
     raise SprayError("渐变喷漆应使用距离 mipmap 配置")
+
+
+def _configured_spray_frames(root: Path, configuration: dict) -> list:
+    return _configured_spray_frame_data(root, configuration)[0]
 
 
 def _configured_spray_mipmaps(root: Path, configuration: dict) -> list:
@@ -1245,10 +1266,11 @@ def apply_spray_collection(
             elif configuration and configuration["mode"] == "dynamic":
                 try:
                     from gif_to_vtf import encode_frames_to_vtf_bytes
-                    vtf = encode_frames_to_vtf_bytes(_configured_spray_frames(root_path, configuration))
+                    frames, tick = _configured_spray_frame_data(root_path, configuration)
+                    vtf = encode_frames_to_vtf_bytes(frames)
                 except (ImportError, OSError, ValueError) as error:
                     raise SprayError(f"生成动态喷漆失败：{error}") from error
-                vmt = _dynamic_imported_spray_vmt(slot_name)
+                vmt = _dynamic_imported_spray_vmt(slot_name, 1000 / tick)
             elif configuration and configuration["mode"] == "gradient":
                 try:
                     vtf = _encode_gradient_vtf(root_path, configuration)

@@ -21,11 +21,10 @@
           <button class="nav-item nav-pinned active" data-nav-id="library" data-category="all" draggable="false" type="button"><i data-lucide="layout-grid"></i>Mod 库</button>
           <button class="nav-item" data-nav-id="map" data-category="map" draggable="true" type="button"><i data-lucide="map"></i>地图</button>
           <button class="nav-item" data-nav-id="archive" data-category="archive" draggable="true" type="button"><i data-lucide="archive"></i>压缩包</button>
-          <button class="nav-item" data-nav-id="model" data-category="model" draggable="true" type="button"><i data-lucide="scan-face"></i>模型</button>
-          <button class="nav-item" data-nav-id="survivor-target" data-category="survivor_target" draggable="true" type="button"><i data-lucide="arrow-left-right"></i>角色调整</button>
+          <button class="nav-item" data-nav-id="survivor-target" data-category="survivor_target" draggable="true" type="button"><i data-lucide="scan-face"></i>模型</button>
           <button class="nav-item" data-nav-id="voice" data-category="voice_replacement" draggable="true" type="button"><i data-lucide="audio-lines"></i>语音替换</button>
           <button class="nav-item" data-nav-id="spray" data-category="spray" draggable="true" type="button"><i data-lucide="image"></i>喷漆</button>
-          <button id="ai-settings-nav" class="nav-item" data-nav-id="ai-settings" draggable="true" type="button"><i data-lucide="brain-circuit"></i>AI 设置</button>
+          <button id="settings-nav" class="nav-item" data-nav-id="settings" draggable="true" type="button"><i data-lucide="settings-2"></i>设置</button>
         </nav>
 
         <div class="sidebar-footer">
@@ -73,16 +72,10 @@
               <button class="filter" data-filter="disabled" type="button">已停用</button>
               <button class="filter filter-conflict" data-filter="conflict" type="button">模型冲突</button>
             </div>
-            <div id="role-filters" class="filters role-filters hidden" role="tablist" aria-label="角色调整类型">
-              <button class="role-filter active" data-role-side="survivor" type="button">生还者角色调整</button>
-              <button class="role-filter" data-role-side="infected" type="button">感染者角色调整</button>
-            </div>
-            <div id="model-filters" class="filters model-filters hidden" role="tablist" aria-label="模型类型筛选">
-              <button class="sub-filter active" data-model-category="all" type="button">全部模型</button>
-              <button class="sub-filter" data-model-category="survivor_model" type="button">幸存者模型</button>
-              <button class="sub-filter" data-model-category="infected_model" type="button">感染者模型</button>
-              <button class="sub-filter" data-model-category="weapon_model" type="button">武器模型</button>
-              <button class="sub-filter" data-model-category="prop_model" type="button">地图模型</button>
+            <div id="role-filters" class="filters role-filters hidden" role="tablist" aria-label="模型类型">
+              <button class="role-filter active" data-role-side="survivor" type="button">生还者模型</button>
+              <button class="role-filter" data-role-side="infected" type="button">感染者模型</button>
+              <button class="role-filter" data-role-side="weapon" type="button">武器模型</button>
             </div>
           </div>
           <div id="selection-actions" class="selection-actions hidden" aria-label="批量操作">
@@ -277,26 +270,44 @@
         </div>
       </div>
     </dialog>
-    <aside id="ai-settings-panel" class="ai-settings-panel hidden" aria-label="AI 设置">
-      <div class="ai-settings-head">
+    <aside id="settings-panel" class="settings-panel hidden" aria-label="设置">
+      <div class="settings-head">
         <div>
-          <h2>AI 设置</h2>
+          <h2>设置</h2>
         </div>
-        <button id="ai-settings-close" class="icon-button" type="button" title="关闭" aria-label="关闭 AI 设置"><i data-lucide="x"></i></button>
+        <button id="settings-close" class="icon-button" type="button" title="关闭" aria-label="关闭设置"><i data-lucide="x"></i></button>
       </div>
-      <div class="ai-settings-form">
-        <label class="settings-label" for="ai-model-select">大模型</label>
-        <select id="ai-model-select" class="settings-input">
-          <option value="deepseek-chat">DeepSeek Chat（通用）</option>
-          <option value="deepseek-reasoner">DeepSeek Reasoner（推理）</option>
-        </select>
-        <label class="settings-label" for="deepseek-key-input">DeepSeek API Key</label>
-        <input id="deepseek-key-input" class="settings-input" type="password" autocomplete="off" placeholder="已配置时留空即可保留" />
-        <div class="ai-settings-actions">
-          <button id="ai-settings-save" class="primary-button" type="button"><i data-lucide="save"></i>保存配置</button>
-          <button id="ai-settings-clear" class="outline-button" type="button">清除 Key</button>
-        </div>
-        <div id="ai-settings-status" class="ai-settings-status"></div>
+      <div class="settings-content">
+        <section class="settings-section" aria-labelledby="ai-settings-section-title">
+          <h3 id="ai-settings-section-title">AI 设置</h3>
+          <div class="settings-form">
+            <label class="settings-label" for="ai-model-select">大模型</label>
+            <select id="ai-model-select" class="settings-input">
+              <option value="deepseek-chat">DeepSeek Chat（通用）</option>
+              <option value="deepseek-reasoner">DeepSeek Reasoner（推理）</option>
+            </select>
+            <label class="settings-label" for="deepseek-key-input">DeepSeek API Key</label>
+            <input id="deepseek-key-input" class="settings-input" type="password" autocomplete="off" placeholder="已配置时留空即可保留" />
+            <div class="settings-actions">
+              <button id="ai-settings-save" class="primary-button" type="button"><i data-lucide="save"></i>保存配置</button>
+              <button id="ai-settings-clear" class="outline-button" type="button">清除 Key</button>
+            </div>
+            <div id="settings-status" class="settings-status"></div>
+          </div>
+        </section>
+        <section class="settings-section" aria-labelledby="update-settings-section-title">
+          <h3 id="update-settings-section-title">程序更新</h3>
+          <label class="settings-check" for="update-auto-check">
+            <input id="update-auto-check" type="checkbox" checked />
+            <span>启动时自动检查更新</span>
+          </label>
+          <div class="settings-version">当前版本：<strong id="update-current-version">读取中…</strong></div>
+          <div class="settings-actions settings-update-actions">
+            <button id="update-check-button" class="outline-button" type="button"><i data-lucide="refresh-cw"></i>检查更新</button>
+            <button id="update-install-button" class="primary-button hidden" type="button"><i data-lucide="download"></i>下载并更新</button>
+          </div>
+          <div id="update-status" class="settings-status" role="status" aria-live="polite"></div>
+        </section>
       </div>
     </aside>
     <script src="https://unpkg.com/lucide@latest"></script>

@@ -23,6 +23,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 from ctypes import wintypes
 
+from app_version import APP_VERSION, UPDATE_REPOSITORY
+
 from folder_picker import choose_folder
 
 from mod_catalog import (
@@ -63,20 +65,309 @@ from voice_replacement import (
 
 
 ARCHIVE_EXTENSIONS = {".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar"}
+INTEGRATION_GAME_DIR = "left4dead2"
+INTEGRATION_CONTENT_DIRS = {
+    "addons",
+    "cfg",
+    "download",
+    "maps",
+    "materials",
+    "media",
+    "models",
+    "missions",
+    "resource",
+    "scripts",
+    "sound",
+}
 SETTINGS_KEY_DEFAULT = "defaultFolder"
 SETTINGS_KEY_LAST = "lastFolder"
 SETTINGS_KEY_DEEPSEEK_API_KEY = "deepseekApiKey"
 SETTINGS_KEY_DEEPSEEK_MODEL = "deepseekModel"
 SETTINGS_KEY_AI_PROMPTS = "aiPrompts"
+SETTINGS_KEY_AUTO_UPDATE_CHECK = "autoUpdateCheck"
+SETTINGS_KEY_NAV_ORDER = "navOrder"
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_MODELS = {"deepseek-chat", "deepseek-reasoner"}
+GITHUB_RELEASE_API_URL = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
+UPDATE_MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 DEFAULT_AI_PROMPT = (
     "请分析这个求生之路 2（Left 4 Dead 2）Mod。根据提供的 VPK 内部路径和检测证据，"
     "用简体中文说明：1. 它大概是什么；2. 可能替换或影响什么内容；3. 判断依据；"
     "4. 不确定的地方。不要把文件名猜测当成确定事实，也不要编造不存在的内容。"
     "如果只有脚本、界面或材质路径，请解释它们可能的用途。"
 )
+
+
+class UpdateError(RuntimeError):
+    """Raised when an application update cannot be safely prepared."""
+
+
+def _version_key(value: str) -> tuple[int, int, int]:
+    match = re.fullmatch(r"v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+].*)?", str(value).strip(), re.IGNORECASE)
+    if not match:
+        raise UpdateError(f"GitHub 返回了无法识别的版本号：{value}")
+    return tuple(int(part or 0) for part in match.groups())
+
+
+def _latest_release() -> dict:
+    request = urllib.request.Request(
+        GITHUB_RELEASE_API_URL,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "Tudou-Mod-Manager",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=12) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+        raise UpdateError(f"无法读取 GitHub 最新版本：{error}") from error
+    if not isinstance(payload, dict):
+        raise UpdateError("GitHub 返回的版本信息无效")
+
+    tag = str(payload.get("tag_name", "")).strip()
+    if not tag:
+        raise UpdateError("GitHub Release 缺少版本号")
+    assets = payload.get("assets")
+    if not isinstance(assets, list):
+        assets = []
+    asset = next(
+        (
+            item for item in assets
+            if isinstance(item, dict)
+            and str(item.get("name", "")).casefold().endswith(".zip")
+            and str(item.get("browser_download_url", "")).startswith("https://github.com/")
+        ),
+        None,
+    )
+    if not asset:
+        raise UpdateError("最新 Release 没有可用的 ZIP 更新包")
+    try:
+        version = _version_key(tag)
+    except UpdateError:
+        raise
+    digest = str(asset.get("digest", "")).strip().casefold()
+    if digest and not digest.startswith("sha256:"):
+        digest = ""
+    return {
+        "version": tag.removeprefix("v"),
+        "versionKey": version,
+        "name": str(payload.get("name", "")).strip() or tag,
+        "releaseUrl": str(payload.get("html_url", "")).strip(),
+        "publishedAt": str(payload.get("published_at", "")).strip(),
+        "notes": str(payload.get("body", "")).strip(),
+        "assetName": str(asset.get("name", "")).strip(),
+        "assetUrl": str(asset.get("browser_download_url", "")).strip(),
+        "assetSize": int(asset.get("size", 0) or 0),
+        "digest": digest.removeprefix("sha256:"),
+    }
+
+
+def update_info() -> dict:
+    release = _latest_release()
+    return {
+        "currentVersion": APP_VERSION,
+        "latestVersion": release["version"],
+        "updateAvailable": release["versionKey"] > _version_key(APP_VERSION),
+        "releaseName": release["name"],
+        "releaseUrl": release["releaseUrl"],
+        "publishedAt": release["publishedAt"],
+        "notes": release["notes"],
+        "assetName": release["assetName"],
+        "assetSize": release["assetSize"],
+    }
+
+
+def auto_update_check_enabled() -> bool:
+    value = _read_settings().get(SETTINGS_KEY_AUTO_UPDATE_CHECK, True)
+    return value if isinstance(value, bool) else True
+
+
+def save_auto_update_check(enabled: bool) -> None:
+    target = settings_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    settings = _read_settings()
+    settings[SETTINGS_KEY_AUTO_UPDATE_CHECK] = bool(enabled)
+    target.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def update_config() -> dict:
+    return {"currentVersion": APP_VERSION, "autoCheck": auto_update_check_enabled()}
+
+
+def navigation_order() -> list[str]:
+    value = _read_settings().get(SETTINGS_KEY_NAV_ORDER, [])
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(str(item) for item in value if isinstance(item, str)))[:32]
+
+
+def save_navigation_order(order: object) -> None:
+    if not isinstance(order, list):
+        raise ValueError("导航顺序设置无效")
+    normalized = list(dict.fromkeys(str(item).strip() for item in order if isinstance(item, str) and str(item).strip()))[:32]
+    target = settings_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    settings = _read_settings()
+    settings[SETTINGS_KEY_NAV_ORDER] = normalized
+    target.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _download_update(release: dict, target: Path) -> Path:
+    update_dir = settings_path().parent / "updates"
+    update_dir.mkdir(parents=True, exist_ok=True)
+    archive = update_dir / f"download-{uuid.uuid4().hex}.zip"
+    request = urllib.request.Request(
+        release["assetUrl"],
+        headers={
+            "Accept": "application/octet-stream",
+            "User-Agent": "Tudou-Mod-Manager",
+        },
+    )
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response, archive.open("wb") as destination:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > UPDATE_MAX_DOWNLOAD_BYTES:
+                    raise UpdateError("更新包超过 512 MB，已停止下载")
+                digest.update(chunk)
+                destination.write(chunk)
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as error:
+        archive.unlink(missing_ok=True)
+        raise UpdateError(f"下载更新包失败：{error}") from error
+    if release.get("assetSize") and total != release["assetSize"]:
+        archive.unlink(missing_ok=True)
+        raise UpdateError("更新包大小校验失败")
+    expected = str(release.get("digest", "")).casefold()
+    if expected and digest.hexdigest().casefold() != expected:
+        archive.unlink(missing_ok=True)
+        raise UpdateError("更新包 SHA-256 校验失败，已取消更新")
+    try:
+        _find_update_executable(archive, target.name)
+    except UpdateError:
+        archive.unlink(missing_ok=True)
+        raise
+    return archive
+
+
+def _find_update_executable(archive: Path, target_name: str) -> str:
+    try:
+        with zipfile.ZipFile(archive) as package:
+            candidates = []
+            for member in package.infolist():
+                name = member.filename.replace("\\", "/")
+                parts = Path(name).parts
+                if Path(name).is_absolute() or ".." in parts:
+                    raise UpdateError("更新包包含不安全的文件路径")
+                if not member.is_dir() and Path(name).suffix.casefold() == ".exe":
+                    candidates.append(name)
+    except (zipfile.BadZipFile, OSError) as error:
+        raise UpdateError(f"更新包不是有效的 ZIP 文件：{error}") from error
+    if not candidates:
+        raise UpdateError("更新包中没有管理器程序")
+    matching = [name for name in candidates if Path(name).name.casefold() == target_name.casefold()]
+    if not matching:
+        matching = [name for name in candidates if Path(name).name == "土豆管理器.exe"]
+    if not matching and len(candidates) == 1:
+        matching = candidates
+    if len(matching) != 1:
+        raise UpdateError("更新包中无法确定要替换的管理器程序")
+    return matching[0]
+
+
+def _write_update_script(script: Path) -> None:
+    script.write_text(
+        """param(
+  [Parameter(Mandatory=$true)][int]$WaitPid,
+  [Parameter(Mandatory=$true)][string]$ArchivePath,
+  [Parameter(Mandatory=$true)][string]$TargetPath,
+  [Parameter(Mandatory=$true)][string]$SourceName,
+  [Parameter(Mandatory=$true)][string]$ScriptPath
+)
+$ErrorActionPreference = 'Stop'
+$stage = Join-Path ([IO.Path]::GetTempPath()) ('tudou-update-' + [guid]::NewGuid().ToString('N'))
+$updated = $false
+try {
+  $deadline = (Get-Date).AddSeconds(60)
+  while ((Get-Process -Id $WaitPid -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+  if (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue) { throw '管理器进程未能正常退出' }
+  Expand-Archive -LiteralPath $ArchivePath -DestinationPath $stage -Force
+  $source = Get-ChildItem -LiteralPath $stage -Recurse -File | Where-Object { $_.Name -ieq $SourceName } | Select-Object -First 1
+  if (-not $source) { throw '更新包中找不到管理器程序' }
+  if (Test-Path -LiteralPath $TargetPath) { Copy-Item -LiteralPath $TargetPath -Destination ($TargetPath + '.previous') -Force }
+  for ($attempt = 0; $attempt -lt 20; $attempt++) {
+    try { Copy-Item -LiteralPath $source.FullName -Destination $TargetPath -Force; $updated = $true; break }
+    catch { Start-Sleep -Milliseconds 500 }
+  }
+  if (-not $updated) { throw '无法替换管理器程序，可能没有写入权限' }
+  Start-Process -FilePath $TargetPath
+} catch {
+  exit 1
+} finally {
+  if ($updated) {
+    Remove-Item -LiteralPath $ArchivePath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $ScriptPath -Force -ErrorAction SilentlyContinue
+  }
+}
+""",
+        encoding="utf-8-sig",
+    )
+
+
+def schedule_update() -> dict:
+    if not getattr(sys, "frozen", False) or Path(sys.executable).suffix.casefold() != ".exe":
+        raise UpdateError("开发模式不能自动替换程序，请下载 Release 后手动更新")
+    target = Path(sys.executable).resolve()
+    release = _latest_release()
+    if release["versionKey"] <= _version_key(APP_VERSION):
+        return {"currentVersion": APP_VERSION, "latestVersion": release["version"], "restartScheduled": False}
+    archive = _download_update(release, target)
+    source_name = Path(_find_update_executable(archive, target.name)).name
+    script = settings_path().parent / f"update-{uuid.uuid4().hex}.ps1"
+    try:
+        _write_update_script(script)
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+        if not powershell:
+            raise UpdateError("找不到 PowerShell，无法执行自动更新")
+        subprocess.Popen(
+            [
+                powershell,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script),
+                "-WaitPid",
+                str(os.getppid()),
+                "-ArchivePath",
+                str(archive),
+                "-TargetPath",
+                str(target),
+                "-SourceName",
+                source_name,
+                "-ScriptPath",
+                str(script),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, UpdateError):
+        script.unlink(missing_ok=True)
+        archive.unlink(missing_ok=True)
+        raise
+    return {
+        "currentVersion": APP_VERSION,
+        "latestVersion": release["version"],
+        "restartScheduled": True,
+    }
 
 
 def resource_root() -> Path:
@@ -363,6 +654,12 @@ def _relative_name(root: Path, path: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
+def _imported_name(root: Path, path: Path) -> str:
+    """Return an imported path even when an integration file is above addons."""
+
+    return Path(os.path.relpath(path, root)).as_posix()
+
+
 def scan_workshop_mods(root: Path) -> dict:
     """Find Workshop VPKs that are not already copied into the workspace."""
     workshop_root = (root / "workshop").resolve()
@@ -452,56 +749,210 @@ def copy_workshop_mods(root: Path, mod_ids: list[str]) -> dict:
     }
 
 
-def _extract_zip(archive: Path, root: Path) -> tuple[list[str], list[str]]:
+def _normalise_archive_name(value: str) -> str:
+    name = str(value).replace("\\", "/")
+    while name.startswith("./"):
+        name = name[2:]
+    return name
+
+
+def _integration_package_info(names: list[str]) -> dict:
+    """Detect a single game-root archive without guessing among variants."""
+
+    roots: dict[str, int] = {}
+    for raw_name in names:
+        name = _normalise_archive_name(raw_name).strip("/")
+        parts = [part for part in name.split("/") if part]
+        for index, part in enumerate(parts[:-1]):
+            if part.casefold() != INTEGRATION_GAME_DIR:
+                continue
+            if parts[index + 1].casefold() not in INTEGRATION_CONTENT_DIRS:
+                continue
+            prefix = "/".join(parts[:index])
+            roots[prefix] = roots.get(prefix, 0) + 1
+            break
+
+    if not roots:
+        return {"packageType": "mod"}
+    if len(roots) > 1:
+        return {
+            "packageType": "integration_ambiguous",
+            "integrationRoots": sorted(roots),
+        }
+    return {
+        "packageType": "integration",
+        "integrationRoot": next(iter(roots)),
+    }
+
+
+def _member_destination(root: Path, name: str, package_info: dict) -> tuple[Path, str] | None:
+    normalized = _normalise_archive_name(name).strip("/")
+    if not normalized:
+        return None
+    if package_info.get("packageType") != "integration":
+        return root, normalized
+
+    prefix = str(package_info.get("integrationRoot", ""))
+    marker = f"{prefix}/{INTEGRATION_GAME_DIR}/" if prefix else f"{INTEGRATION_GAME_DIR}/"
+    if not normalized.casefold().startswith(marker.casefold()):
+        return None
+    relative = normalized[len(marker):]
+    if not relative:
+        return None
+    return root.parent, relative
+
+
+def _validate_archive_members(root: Path, names: list[str], package_info: dict) -> None:
+    for name in names:
+        normalized = _normalise_archive_name(name).strip("/")
+        if not normalized:
+            continue
+        destination = _member_destination(root, normalized, package_info)
+        if destination is None:
+            # Unrelated files are ignored for a single-root integration pack,
+            # but their original path is still checked before extraction.
+            _safe_path(root, normalized)
+            continue
+        _safe_path(destination[0], destination[1])
+
+
+def _extract_zip(archive: Path, root: Path, package_info: dict | None = None) -> dict:
     imported: list[str] = []
     conflicts: list[str] = []
     with zipfile.ZipFile(archive) as package:
-        for member in package.infolist():
-            target = _safe_path(root, member.filename)
+        members = package.infolist()
+        info = package_info or _integration_package_info([member.filename for member in members])
+        _validate_archive_members(root, [member.filename for member in members], info)
+        for member in members:
+            destination = _member_destination(root, member.filename, info)
+            if destination is None:
+                continue
+            target_root, relative_name = destination
+            target = _safe_path(target_root, relative_name)
             if member.is_dir():
                 target.mkdir(parents=True, exist_ok=True)
                 continue
             with package.open(member) as source:
+                result_name = _imported_name(root, target)
                 if _copy_archive_file(source, target):
-                    imported.append(_relative_name(root, target))
+                    imported.append(result_name)
                 else:
-                    conflicts.append(_relative_name(root, target))
-    return imported, conflicts
+                    conflicts.append(result_name)
+    return {"imported": imported, "conflicts": conflicts, **info}
 
 
-def _extract_tar(archive: Path, root: Path) -> tuple[list[str], list[str]]:
+def _extract_tar(archive: Path, root: Path, package_info: dict | None = None) -> dict:
     imported: list[str] = []
     conflicts: list[str] = []
     with tarfile.open(archive, mode="r:*") as package:
-        for member in package.getmembers():
-            target = _safe_path(root, member.name)
+        members = package.getmembers()
+        if any(not member.isdir() and not member.isfile() for member in members):
+            raise ValueError("archive contains an unsupported link or special file")
+        info = package_info or _integration_package_info([member.name for member in members])
+        _validate_archive_members(root, [member.name for member in members], info)
+        for member in members:
+            destination = _member_destination(root, member.name, info)
+            if destination is None:
+                continue
+            target_root, relative_name = destination
+            target = _safe_path(target_root, relative_name)
             if member.isdir():
                 target.mkdir(parents=True, exist_ok=True)
                 continue
-            if not member.isfile():
-                raise ValueError("archive contains an unsupported link or special file")
             source = package.extractfile(member)
             if source is None:
                 continue
             with source:
+                result_name = _imported_name(root, target)
                 if _copy_archive_file(source, target):
-                    imported.append(_relative_name(root, target))
+                    imported.append(result_name)
                 else:
-                    conflicts.append(_relative_name(root, target))
-    return imported, conflicts
+                    conflicts.append(result_name)
+    return {"imported": imported, "conflicts": conflicts, **info}
+
+
+def _external_archive_tool() -> tuple[str, str] | None:
+    for command in ("tar", "7z", "7zz"):
+        executable = shutil.which(command)
+        if executable:
+            return command, executable
+    return None
+
+
+def _extract_external_to_stage(archive: Path, stage: Path) -> None:
+    tool = _external_archive_tool()
+    if tool is None:
+        raise ValueError("当前环境没有可用的 7z/RAR 解压工具，请先安装 7-Zip")
+    command_name, executable = tool
+    if command_name == "tar":
+        command = [executable, "-xf", str(archive), "-C", str(stage)]
+    else:
+        command = [executable, "x", str(archive), f"-o{stage}", "-y"]
+    completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if completed.returncode:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise ValueError(f"无法读取压缩包：{detail or '外部解压工具执行失败'}")
+
+
+def _extract_staged_tree(stage: Path, root: Path, package_info: dict) -> dict:
+    paths = list(stage.rglob("*"))
+    if any(path.is_symlink() for path in paths):
+        raise ValueError("archive contains an unsupported link or special file")
+    names = [_relative_name(stage, path) for path in paths if path.is_file()]
+    _validate_archive_members(root, names, package_info)
+    imported: list[str] = []
+    conflicts: list[str] = []
+    for name in names:
+        destination = _member_destination(root, name, package_info)
+        if destination is None:
+            continue
+        target_root, relative_name = destination
+        target = _safe_path(target_root, relative_name)
+        with (stage / name).open("rb") as source:
+            result_name = _imported_name(root, target)
+            if _copy_archive_file(source, target):
+                imported.append(result_name)
+            else:
+                conflicts.append(result_name)
+    return {"imported": imported, "conflicts": conflicts, **package_info}
+
+
+def _extract_external_archive(archive: Path, root: Path) -> dict:
+    with tempfile.TemporaryDirectory(prefix="l4d2-mod-archive-") as temporary:
+        stage = Path(temporary)
+        _extract_external_to_stage(archive, stage)
+        names = [_relative_name(stage, path) for path in stage.rglob("*") if path.is_file()]
+        info = _integration_package_info(names)
+        if info.get("packageType") == "integration_ambiguous":
+            raise ValueError(
+                f"检测到整合包，但其中包含 {len(info['integrationRoots'])} 套 left4dead2 目录，未自动合并；请先拆分出要导入的版本"
+            )
+        return _extract_staged_tree(stage, root, info)
 
 
 def extract_archive(archive: Path, root: Path) -> dict:
     suffix = archive.suffix.casefold()
     if suffix == ".zip":
-        imported, conflicts = _extract_zip(archive, root)
-    elif suffix in {".tar", ".gz", ".tgz", ".bz2", ".xz"}:
-        imported, conflicts = _extract_tar(archive, root)
-    elif suffix in {".7z", ".rar"}:
-        raise ValueError("当前环境没有可用的 7z/RAR 解压工具，请先安装 7-Zip")
-    else:
-        raise ValueError("不支持的压缩包格式")
-    return {"imported": imported, "conflicts": conflicts}
+        with zipfile.ZipFile(archive) as package:
+            names = [member.filename for member in package.infolist()]
+        info = _integration_package_info(names)
+        if info.get("packageType") == "integration_ambiguous":
+            raise ValueError(
+                f"检测到整合包，但其中包含 {len(info['integrationRoots'])} 套 left4dead2 目录，未自动合并；请先拆分出要导入的版本"
+            )
+        return _extract_zip(archive, root, info)
+    if suffix in {".tar", ".gz", ".tgz", ".bz2", ".xz"}:
+        with tarfile.open(archive, mode="r:*") as package:
+            names = [member.name for member in package.getmembers()]
+        info = _integration_package_info(names)
+        if info.get("packageType") == "integration_ambiguous":
+            raise ValueError(
+                f"检测到整合包，但其中包含 {len(info['integrationRoots'])} 套 left4dead2 目录，未自动合并；请先拆分出要导入的版本"
+            )
+        return _extract_tar(archive, root, info)
+    if suffix in {".7z", ".rar"}:
+        return _extract_external_archive(archive, root)
+    raise ValueError("不支持的压缩包格式")
 
 
 def _find_mod(root: Path, mod_id: str, catalog: list[dict] | None = None) -> dict | None:
@@ -827,6 +1278,18 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         request_path = urlsplit(self.path).path
+        if request_path == "/api/update/config":
+            self._send_json(200, update_config())
+            return
+        if request_path == "/api/navigation/order":
+            self._send_json(200, {"order": navigation_order()})
+            return
+        if request_path == "/api/update/check":
+            try:
+                self._send_json(200, update_info())
+            except UpdateError as error:
+                self._send_json(502, {"error": str(error)})
+            return
         if request_path == "/api/source-version":
             payload = json.dumps(
                 {"version": source_version(self.static_root)},
@@ -973,6 +1436,25 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:
         route = urlsplit(self.path).path
         try:
+            if route == "/api/update/config":
+                payload = self._read_json()
+                enabled = payload.get("autoCheck")
+                if not isinstance(enabled, bool):
+                    raise ValueError("自动检查更新设置无效")
+                save_auto_update_check(enabled)
+                self._send_json(200, update_config())
+                return
+
+            if route == "/api/navigation/order":
+                payload = self._read_json()
+                save_navigation_order(payload.get("order"))
+                self._send_json(200, {"ok": True, "order": navigation_order()})
+                return
+
+            if route == "/api/update/install":
+                self._send_json(200, {"ok": True, **schedule_update()})
+                return
+
             if route == "/api/ai/config":
                 payload = self._read_json()
                 raw_api_key = payload.get("apiKey") if "apiKey" in payload else None
@@ -1511,7 +1993,7 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
                 filename = Path(unquote(self.headers.get("X-Filename", ""))).name
                 suffix = Path(filename).suffix.casefold()
                 if not filename or suffix not in ARCHIVE_EXTENSIONS:
-                    self._send_json(400, {"error": "请选择 ZIP 或常见 tar 压缩包"})
+                    self._send_json(400, {"error": "请选择 ZIP、TAR、7Z 或 RAR 压缩包"})
                     return
                 length = int(self.headers.get("Content-Length", "0"))
                 if length <= 0:
@@ -1546,6 +2028,8 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
                 return
 
             self._send_json(404, {"error": "未知操作"})
+        except UpdateError as error:
+            self._send_json(400, {"error": str(error)})
         except VoiceReplacementConflict as error:
             self._send_json(409, {"error": str(error), "conflicts": error.conflicts})
         except (OSError, ValueError, json.JSONDecodeError, zipfile.BadZipFile, tarfile.TarError) as error:

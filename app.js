@@ -1,5 +1,5 @@
 const state = {
-  mods: [], category: "all", roleSide: "survivor", modelFilter: "all", filter: "all", search: "", sort: "name", selectedIds: new Set(),
+  mods: [], category: "all", roleSide: "survivor", filter: "all", search: "", sort: "name", selectedIds: new Set(),
 };
 
 const NAV_ORDER_STORAGE_KEY = "l4d2-mod-manager.nav-order";
@@ -31,8 +31,7 @@ const viewTitles = {
   all: "我的 Mod",
   map: "地图 Mod",
   archive: "压缩包 Mod",
-  model: "模型 Mod",
-  survivor_target: "生还者角色调整",
+  survivor_target: "模型",
   voice_replacement: "语音替换 Mod",
   spray: "喷漆 Mod",
 };
@@ -57,10 +56,15 @@ const aiRunButton = document.querySelector("#ai-run-button");
 const aiSavePromptButton = document.querySelector("#ai-save-prompt-button");
 const aiDeletePromptButton = document.querySelector("#ai-delete-prompt-button");
 const aiAnalysisStatus = document.querySelector("#ai-analysis-status");
-const aiSettingsPanel = document.querySelector("#ai-settings-panel");
+const settingsPanel = document.querySelector("#settings-panel");
 const aiModelSelect = document.querySelector("#ai-model-select");
 const deepseekKeyInput = document.querySelector("#deepseek-key-input");
-const aiSettingsStatus = document.querySelector("#ai-settings-status");
+const settingsStatus = document.querySelector("#settings-status");
+const updateAutoCheck = document.querySelector("#update-auto-check");
+const updateCurrentVersion = document.querySelector("#update-current-version");
+const updateCheckButton = document.querySelector("#update-check-button");
+const updateInstallButton = document.querySelector("#update-install-button");
+const updateStatus = document.querySelector("#update-status");
 const importPreviewDialog = document.querySelector("#import-preview-dialog");
 const importPreviewList = document.querySelector("#import-preview-list");
 const importPreviewSummary = document.querySelector("#import-preview-summary");
@@ -128,6 +132,7 @@ let activeAiMod = null;
 let aiPrompts = { default: null, custom: [] };
 let aiHistory = [];
 let operationBusy = false;
+let latestUpdateInfo = null;
 let sprayAssets = [];
 let sprayAssignments = {};
 let spraySourceTab = "mod";
@@ -149,7 +154,7 @@ function setSidebarCollapsed(collapsed, persist = true) {
 }
 
 function toggleSidebar() {
-  closeAiSettings();
+  closeSettings();
   setSidebarCollapsed(!shell.classList.contains("sidebar-collapsed"));
 }
 
@@ -157,16 +162,17 @@ function restoreSidebarState() {
   setSidebarCollapsed(localStorage.getItem(SIDEBAR_STATE_STORAGE_KEY) === "true", false);
 }
 
-function restoreNavOrder() {
+function normalizeNavOrder(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value
+    .filter((id) => typeof id === "string")
+    .map((id) => id === "ai-settings" ? "settings" : id))];
+}
+
+function applyNavOrder(savedOrder) {
   const nav = document.querySelector(".nav");
   if (!nav) return;
-  let savedOrder = [];
-  try {
-    const parsed = JSON.parse(localStorage.getItem(NAV_ORDER_STORAGE_KEY) || "[]");
-    savedOrder = Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string") : [];
-  } catch {
-    savedOrder = [];
-  }
+  savedOrder = normalizeNavOrder(savedOrder);
   const items = new Map([...nav.querySelectorAll(".nav-item")].map((item) => [item.dataset.navId, item]));
   const orderedIds = [
     "library",
@@ -179,6 +185,49 @@ function restoreNavOrder() {
   });
 }
 
+function readLocalNavOrder() {
+  try {
+    return normalizeNavOrder(JSON.parse(localStorage.getItem(NAV_ORDER_STORAGE_KEY) || "[]"));
+  } catch {
+    return [];
+  }
+}
+
+function restoreNavOrder() {
+  const savedOrder = readLocalNavOrder();
+  applyNavOrder(savedOrder);
+  return savedOrder;
+}
+
+async function restoreNavOrderFromServer(localOrder) {
+  try {
+    const response = await fetch("/api/navigation/order", { cache: "no-store" });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    const serverOrder = normalizeNavOrder(result.order);
+    if (serverOrder.length) {
+      applyNavOrder(serverOrder);
+      localStorage.setItem(NAV_ORDER_STORAGE_KEY, JSON.stringify(serverOrder));
+    } else if (localOrder.length) {
+      await persistNavOrder(localOrder);
+    }
+  } catch {
+    // Local order remains available when the settings endpoint is unavailable.
+  }
+}
+
+async function persistNavOrder(order) {
+  try {
+    await fetch("/api/navigation/order", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ order }),
+    });
+  } catch {
+    // Keep the browser cache as a fallback for the current session.
+  }
+}
+
 function saveNavOrder() {
   const nav = document.querySelector(".nav");
   if (!nav) return;
@@ -188,6 +237,7 @@ function saveNavOrder() {
   } catch {
     // Navigation still works when browser storage is unavailable.
   }
+  persistNavOrder(order);
 }
 
 function initializeNavDragging() {
@@ -377,15 +427,16 @@ function visibleMods() {
         : state.filter === "conflict" ? (mod.modelConflicts || []).length > 0
           : mod.status === state.filter);
     const primaryCategories = effectivePrimaryCategories(mod);
-    const hasRoleTarget = getModelTargets(mod).some((target) => target.side === state.roleSide);
+    const modelCategoryBySide = {
+      survivor: "survivor_model",
+      infected: "infected_model",
+      weapon: "weapon_model",
+    };
+    const hasPrimaryModelCategory = primaryCategories.includes(modelCategoryBySide[state.roleSide]);
     const categoryMatch = state.category === "all"
       || primaryCategories.includes(state.category)
-      || (state.category === "model" && primaryCategories.some((category) => category.endsWith("_model")))
-      || (state.category === "survivor_target" && hasRoleTarget);
-    const modelMatch = state.category !== "model"
-      || state.modelFilter === "all"
-      || primaryCategories.includes(state.modelFilter);
-    return filterMatch && categoryMatch && modelMatch && (!query || haystack.includes(query));
+      || (state.category === "survivor_target" && hasPrimaryModelCategory);
+    return filterMatch && categoryMatch && (!query || haystack.includes(query));
   });
   return filtered.sort((left, right) => {
     if (state.sort === "vpk") {
@@ -404,7 +455,6 @@ function renderStats() {
   const mods = visibleMods();
   const isFiltered = state.category !== "all"
     || state.filter !== "all"
-    || (state.category === "model" && state.modelFilter !== "all")
     || state.search.trim() !== "";
   document.querySelector("#total-label").textContent = isFiltered ? "当前视图" : "全部 Mod";
   document.querySelector("#total-count").textContent = mods.length;
@@ -416,7 +466,7 @@ function renderStats() {
 
 function renderViewTitle() {
   const title = state.category === "survivor_target"
-    ? (state.roleSide === "infected" ? "感染者角色调整" : "生还者角色调整")
+    ? (state.roleSide === "infected" ? "感染者模型" : state.roleSide === "weapon" ? "武器模型" : "生还者模型")
     : (viewTitles[state.category] || viewTitles.all);
   document.querySelector("#page-title").textContent = title;
   document.querySelector("#spray-manager-button").classList.toggle("hidden", state.category !== "spray");
@@ -974,7 +1024,6 @@ function render() {
   const mods = visibleMods();
   renderStats();
   renderViewTitle();
-  document.querySelector("#model-filters").classList.toggle("hidden", state.category !== "model");
   document.querySelector("#role-filters").classList.toggle("hidden", state.category !== "survivor_target");
   grid.innerHTML = mods.length ? mods.map(renderCard).join("") : `<div class="empty">没有符合条件的 Mod</div>`;
   if (window.lucide) lucide.createIcons();
@@ -1540,7 +1589,7 @@ function modelTargetKey(target) {
 }
 
 function modelTargetLabel(target) {
-  const side = target.side === "survivor" ? "幸存者" : "感染者";
+  const side = target.side === "survivor" ? "幸存者" : target.side === "weapon" ? "武器" : "感染者";
   return `${side} · ${target.name}`;
 }
 
@@ -1571,7 +1620,10 @@ function refreshModelConflictState() {
 }
 
 function getModelTargets(mod) {
-  return (mod.characterTargets || []).filter((target) => target.side && target.id);
+  return [
+    ...(mod.characterTargets || []),
+    ...(mod.weaponTargets || []).map((target) => ({ ...target, side: "weapon" })),
+  ].filter((target) => target.side && target.id);
 }
 
 function findEnableConflicts(modsToEnable) {
@@ -1655,21 +1707,78 @@ async function getAiConfig() {
   return result;
 }
 
-async function openAiSettings() {
-  aiSettingsPanel.classList.remove("hidden");
-  aiSettingsStatus.textContent = "正在读取配置…";
+async function getUpdateConfig() {
+  const response = await fetch("/api/update/config", { cache: "no-store" });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+  return result;
+}
+
+async function checkForUpdates({ automatic = false } = {}) {
+  if (!automatic) {
+    updateStatus.textContent = "正在检查更新…";
+  }
   try {
-    const config = await getAiConfig();
-    aiModelSelect.value = config.model || "deepseek-chat";
-    deepseekKeyInput.value = "";
-    aiSettingsStatus.textContent = config.configured ? "API Key 已配置" : "尚未配置 API Key";
+    const response = await fetch(`/api/update/check?time=${Date.now()}`, { cache: "no-store" });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    latestUpdateInfo = result;
+    updateCurrentVersion.textContent = `v${result.currentVersion}`;
+    updateInstallButton.classList.toggle("hidden", !result.updateAvailable);
+    if (result.updateAvailable) {
+      updateStatus.textContent = `发现新版本 v${result.latestVersion}`;
+      if (automatic) showNotice(`发现新版本 v${result.latestVersion}，请打开设置进行更新`);
+    } else {
+      updateStatus.textContent = `当前已是最新版本 v${result.currentVersion}`;
+    }
+    return result;
   } catch (error) {
-    aiSettingsStatus.textContent = `读取失败：${error.message}`;
+    if (!automatic) updateStatus.textContent = `检查失败：${error.message}`;
+    return null;
   }
 }
 
-function closeAiSettings() {
-  aiSettingsPanel.classList.add("hidden");
+async function saveUpdateCheckSetting(enabled) {
+  const result = await postJson("/api/update/config", { autoCheck: enabled });
+  updateAutoCheck.checked = result.autoCheck;
+  updateStatus.textContent = result.autoCheck ? "已开启启动时自动检查" : "已关闭启动时自动检查";
+}
+
+async function installUpdate() {
+  if (!latestUpdateInfo || !latestUpdateInfo.updateAvailable) {
+    await checkForUpdates();
+    return;
+  }
+  updateStatus.textContent = "正在下载并准备更新，请稍候…";
+  const result = await postJson("/api/update/install", {});
+  if (!result.restartScheduled) {
+    updateStatus.textContent = `当前已是最新版本 v${result.latestVersion || latestUpdateInfo.currentVersion}`;
+    updateInstallButton.classList.add("hidden");
+    return;
+  }
+  updateInstallButton.classList.add("hidden");
+  updateStatus.textContent = `已下载 v${result.latestVersion}，程序即将重启完成更新`;
+  showNotice("更新包已准备好，程序即将关闭并重启", true);
+  window.setTimeout(() => window.close(), 1200);
+}
+
+async function openSettings() {
+  settingsPanel.classList.remove("hidden");
+  settingsStatus.textContent = "正在读取配置…";
+  try {
+    const [config, updateConfig] = await Promise.all([getAiConfig(), getUpdateConfig()]);
+    aiModelSelect.value = config.model || "deepseek-chat";
+    deepseekKeyInput.value = "";
+    settingsStatus.textContent = config.configured ? "API Key 已配置" : "尚未配置 API Key";
+    updateAutoCheck.checked = updateConfig.autoCheck !== false;
+    updateCurrentVersion.textContent = `v${updateConfig.currentVersion}`;
+  } catch (error) {
+    settingsStatus.textContent = `读取失败：${error.message}`;
+  }
+}
+
+function closeSettings() {
+  settingsPanel.classList.add("hidden");
 }
 
 async function saveAiSettings() {
@@ -1680,9 +1789,9 @@ async function saveAiSettings() {
       ...(apiKey ? { apiKey } : {}),
     });
     deepseekKeyInput.value = "";
-    aiSettingsStatus.textContent = "配置已保存";
+    settingsStatus.textContent = "配置已保存";
   } catch (error) {
-    aiSettingsStatus.textContent = `保存失败：${error.message}`;
+    settingsStatus.textContent = `保存失败：${error.message}`;
   }
 }
 
@@ -1690,9 +1799,9 @@ async function clearAiKey() {
   try {
     await postJson("/api/ai/config", { model: aiModelSelect.value, apiKey: "" });
     deepseekKeyInput.value = "";
-    aiSettingsStatus.textContent = "API Key 已清除";
+    settingsStatus.textContent = "API Key 已清除";
   } catch (error) {
-    aiSettingsStatus.textContent = `清除失败：${error.message}`;
+    settingsStatus.textContent = `清除失败：${error.message}`;
   }
 }
 
@@ -1776,7 +1885,7 @@ async function openAiWorkspace(mod) {
     if (!aiHistory.length) showAiHistoryEntry(null);
     aiAnalysisStatus.textContent = config.configured
       ? `模型：${config.model}`
-      : "尚未配置 API Key，请先在左侧 AI 设置中配置";
+      : "尚未配置 API Key，请先在设置中配置";
   } catch (error) {
     aiAnalysisStatus.textContent = `读取失败：${error.message}`;
   }
@@ -2068,7 +2177,10 @@ async function importArchive(file) {
       activeImportMods = [];
       render();
     }
-    showNotice(`已导入 ${result.imported.length} 个文件${conflictText}`, true);
+    const packageText = result.packageType === "integration"
+      ? "，已识别为整合包并按游戏目录导入"
+      : "";
+    showNotice(`已导入 ${result.imported.length} 个文件${conflictText}${packageText}`, true);
   } catch (error) {
     showNotice(`导入失败：${error.message}`);
   }
@@ -2192,17 +2304,10 @@ document.querySelectorAll(".filter").forEach((button) => button.addEventListener
 }));
 document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => {
   if (operationBusy) return;
-  if (button.id === "ai-settings-nav") return;
+  if (button.dataset.navId === "settings") return;
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.remove("active"));
   button.classList.add("active");
   state.category = button.dataset.category;
-  render();
-}));
-document.querySelectorAll(".sub-filter").forEach((button) => button.addEventListener("click", () => {
-  if (operationBusy) return;
-  document.querySelectorAll(".sub-filter").forEach((item) => item.classList.remove("active"));
-  button.classList.add("active");
-  state.modelFilter = button.dataset.modelCategory;
   render();
 }));
 document.querySelectorAll(".role-filter").forEach((button) => button.addEventListener("click", () => {
@@ -2238,11 +2343,24 @@ aiPromptSelect.addEventListener("change", () => {
 aiRunButton.addEventListener("click", () => runExclusiveOperation("正在进行 AI 分析，请稍候…", runAiAnalysis));
 aiSavePromptButton.addEventListener("click", () => runExclusiveOperation("正在保存提示词，请稍候…", saveCurrentPrompt));
 aiDeletePromptButton.addEventListener("click", () => runExclusiveOperation("正在删除提示词，请稍候…", deleteCurrentPrompt));
-document.querySelector("#ai-settings-nav").addEventListener("click", openAiSettings);
+document.querySelector("#settings-nav").addEventListener("click", openSettings);
 sidebarToggleButton.addEventListener("click", toggleSidebar);
-document.querySelector("#ai-settings-close").addEventListener("click", closeAiSettings);
+document.querySelector("#settings-close").addEventListener("click", closeSettings);
 document.querySelector("#ai-settings-save").addEventListener("click", () => runExclusiveOperation("正在保存 AI 设置，请稍候…", saveAiSettings));
 document.querySelector("#ai-settings-clear").addEventListener("click", () => runExclusiveOperation("正在清除 API Key，请稍候…", clearAiKey));
+updateAutoCheck.addEventListener("change", () => {
+  const enabled = updateAutoCheck.checked;
+  runExclusiveOperation("正在保存更新设置，请稍候…", async () => {
+    try {
+      await saveUpdateCheckSetting(enabled);
+    } catch (error) {
+      updateAutoCheck.checked = !enabled;
+      updateStatus.textContent = `保存失败：${error.message}`;
+    }
+  });
+});
+updateCheckButton.addEventListener("click", () => runExclusiveOperation("正在检查更新，请稍候…", () => checkForUpdates()));
+updateInstallButton.addEventListener("click", () => runExclusiveOperation("正在下载更新，请稍候…", installUpdate));
 document.querySelector("#refresh-button").addEventListener("click", refreshCatalog);
 document.querySelector("#change-folder-button").addEventListener("click", changeFolder);
 document.querySelector("#reset-folder-button").addEventListener("click", resetFolder);
@@ -2418,9 +2536,15 @@ document.addEventListener("keydown", (event) => {
 });
 
 restoreSidebarState();
-restoreNavOrder();
+const initialNavOrder = restoreNavOrder();
+restoreNavOrderFromServer(initialNavOrder);
 initializeNavDragging();
 if (window.lucide) lucide.createIcons();
 loadCatalog();
+getUpdateConfig().then((config) => {
+  if (config.autoCheck) checkForUpdates({ automatic: true });
+}).catch(() => {
+  // Update checks must never prevent the Mod library from opening.
+});
 checkForSourceChanges();
 window.setInterval(checkForSourceChanges, 1000);

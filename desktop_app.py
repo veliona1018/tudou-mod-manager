@@ -7,7 +7,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import webbrowser
@@ -50,9 +49,9 @@ def log(message: str) -> None:
 
 def app_profile_dir() -> Path:
     local_app_data = Path(os.environ.get("LOCALAPPDATA", Path.cwd()))
-    sessions = local_app_data / "L4D2ModManager" / "Sessions"
-    sessions.mkdir(parents=True, exist_ok=True)
-    return Path(tempfile.mkdtemp(prefix="session-", dir=sessions))
+    profile = local_app_data / "L4D2ModManager" / "BrowserProfile"
+    profile.mkdir(parents=True, exist_ok=True)
+    return profile
 
 
 def start_server(root: Path, port: int) -> subprocess.Popen:
@@ -291,7 +290,7 @@ def main() -> None:
     server_process = start_server(root, port)
     url = f"http://127.0.0.1:{port}/"
     log(f"Opening Mod manager: {url}")
-    browser_process, profile_dir = open_app_window(url)
+    browser_process, _profile_dir = open_app_window(url)
     stop_event = threading.Event()
     state_lock = threading.Lock()
     state = {"process": server_process}
@@ -318,8 +317,6 @@ def main() -> None:
             watcher.join(timeout=2)
         with state_lock:
             stop_server(state["process"])
-        if profile_dir:
-            shutil.rmtree(profile_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

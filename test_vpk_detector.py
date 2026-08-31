@@ -776,6 +776,42 @@ class VPKDetectorTests(unittest.TestCase):
             result = extract_archive(clean_archive, root)
             self.assertEqual(result["imported"], ["folder/new_mod.vpk"])
 
+    def test_zip_import_auto_detects_single_game_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "left4dead2" / "addons"
+            root.mkdir(parents=True)
+            archive = Path(temp_dir) / "integration.zip"
+            with zipfile.ZipFile(archive, "w") as package:
+                package.writestr(
+                    "bundle/left4dead2/addons/integration.vpk",
+                    make_vpk(["maps/c1m1_hotel.bsp"]),
+                )
+                package.writestr("bundle/left4dead2/cfg/server.cfg", "sv_cheats 0\n")
+                package.writestr("bundle/readme.txt", "not installed into the game root")
+
+            result = extract_archive(archive, root)
+
+            self.assertEqual(result["packageType"], "integration")
+            self.assertEqual(result["imported"], ["integration.vpk", "../cfg/server.cfg"])
+            self.assertTrue((root / "integration.vpk").is_file())
+            self.assertTrue((root.parent / "cfg" / "server.cfg").is_file())
+            self.assertFalse((root / "bundle").exists())
+
+    def test_import_does_not_merge_multiple_game_roots(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "left4dead2" / "addons"
+            root.mkdir(parents=True)
+            archive = Path(temp_dir) / "multi-integration.zip"
+            with zipfile.ZipFile(archive, "w") as package:
+                package.writestr("windows/left4dead2/addons/windows.vpk", b"windows")
+                package.writestr("linux/left4dead2/addons/linux.vpk", b"linux")
+
+            with self.assertRaisesRegex(ValueError, "包含 2 套 left4dead2 目录"):
+                extract_archive(archive, root)
+
+            self.assertFalse((root / "windows.vpk").exists())
+            self.assertFalse((root / "linux.vpk").exists())
+
     def test_spray_collection_combines_individual_assets(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1129,6 +1165,9 @@ class VPKDetectorTests(unittest.TestCase):
             dynamic_vmt = read_vpk_file(root / dynamic_result["vpk"], "materials/vgui/logos/2.vmt").decode("ascii")
             self.assertEqual(struct.unpack_from("<H", dynamic_vtf, 24)[0], 2)
             self.assertIn('"UnlitGeneric"', dynamic_vmt)
+            self.assertIn('"AnimatedTexture"', dynamic_vmt)
+            self.assertIn('"animatedTextureFrameNumVar" "$frame"', dynamic_vmt)
+            self.assertIn('"animatedTextureFrameRate" "10"', dynamic_vmt)
 
             save_spray_configuration(
                 root,
@@ -1146,6 +1185,9 @@ class VPKDetectorTests(unittest.TestCase):
             stitched_result = apply_spray_collection(root, build_catalog(root), {"4": red["id"]})
             stitched_vtf = read_vpk_file(root / stitched_result["vpk"], "materials/vgui/logos/4.vtf")
             self.assertLessEqual(struct.unpack_from("<H", stitched_vtf, 24)[0], 16)
+            stitched_vmt = read_vpk_file(root / stitched_result["vpk"], "materials/vgui/logos/4.vmt").decode("ascii")
+            # 499 ms is quantized to the supported 20 ms minimum tick.
+            self.assertIn('"animatedTextureFrameRate" "50"', stitched_vmt)
 
             save_spray_configuration(
                 root,

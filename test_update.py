@@ -1,0 +1,49 @@
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+from unittest.mock import patch
+
+from mod_server import UpdateError, _find_update_executable, _version_key, update_info
+
+
+class UpdateTests(unittest.TestCase):
+    def test_version_key_compares_common_release_formats(self):
+        self.assertEqual(_version_key("v0.2"), (0, 2, 0))
+        self.assertLess(_version_key("0.2"), _version_key("v0.2.1"))
+        self.assertLess(_version_key("v0.9"), _version_key("v1.0"))
+
+    def test_update_info_marks_newer_release(self):
+        release = {
+            "version": "0.3",
+            "versionKey": (0, 3, 0),
+            "name": "土豆管理器 v0.3",
+            "releaseUrl": "https://github.com/veliona1018/tudou-mod-manager/releases/tag/v0.3",
+            "publishedAt": "2026-08-28T00:00:00Z",
+            "notes": "测试版本",
+            "assetName": "-v0.3.zip",
+            "assetSize": 123,
+        }
+        with patch("mod_server._latest_release", return_value=release):
+            result = update_info()
+        self.assertTrue(result["updateAvailable"])
+        self.assertEqual(result["latestVersion"], "0.3")
+
+    def test_update_archive_requires_a_manager_executable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "update.zip"
+            with zipfile.ZipFile(archive, "w") as package:
+                package.writestr("土豆管理器.exe", b"placeholder")
+            self.assertEqual(_find_update_executable(archive, "土豆管理器.exe"), "土豆管理器.exe")
+
+    def test_update_archive_rejects_path_traversal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "unsafe.zip"
+            with zipfile.ZipFile(archive, "w") as package:
+                package.writestr("../土豆管理器.exe", b"placeholder")
+            with self.assertRaises(UpdateError):
+                _find_update_executable(archive, "土豆管理器.exe")
+
+
+if __name__ == "__main__":
+    unittest.main()
