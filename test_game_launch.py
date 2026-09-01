@@ -26,7 +26,7 @@ class GameLaunchTests(unittest.TestCase):
             addons.mkdir(parents=True)
             executable = install / "left4dead2.exe"
             executable.write_bytes(b"MZ")
-            with patch("mod_server.subprocess.Popen") as popen:
+            with patch("mod_server.os.startfile", create=True, side_effect=OSError), patch("mod_server.shutil.which", return_value=None), patch("mod_server.subprocess.Popen") as popen:
                 result = launch_game(addons)
 
             self.assertEqual(result["mode"], "direct")
@@ -38,6 +38,17 @@ class GameLaunchTests(unittest.TestCase):
                 stderr=subprocess.DEVNULL,
                 creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
             )
+
+    @unittest.skipUnless(os.name == "nt", "Steam URI fallback is Windows-specific")
+    def test_prefers_steam_even_when_executable_exists(self):
+        with tempfile.TemporaryDirectory() as temporary, patch("mod_server.os.startfile") as startfile, patch("mod_server.subprocess.Popen") as popen:
+            executable = Path(temporary) / "left4dead2.exe"
+            executable.write_bytes(b"MZ")
+            result = launch_game(Path(temporary))
+
+        self.assertEqual(result, {"ok": True, "mode": "steam"})
+        startfile.assert_called_once_with("steam://rungameid/550")
+        popen.assert_not_called()
 
     @unittest.skipUnless(os.name == "nt", "Steam URI fallback is Windows-specific")
     def test_falls_back_to_steam_when_executable_is_missing(self):

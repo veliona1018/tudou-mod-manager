@@ -468,7 +468,31 @@ def find_game_executable(mod_root: Path) -> Path | None:
 
 
 def launch_game(mod_root: Path) -> dict:
-    """Launch the game associated with the current Mod directory."""
+    """Launch the game through Steam first so Steam launch options apply."""
+    if os.name == "nt":
+        startfile = getattr(os, "startfile", None)
+        if startfile:
+            try:
+                startfile(GAME_STEAM_URI)
+            except OSError:
+                pass
+            else:
+                return {"ok": True, "mode": "steam"}
+    else:
+        steam = shutil.which("steam")
+        if steam:
+            try:
+                subprocess.Popen(
+                    [steam, GAME_STEAM_URI],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError:
+                pass
+            else:
+                return {"ok": True, "mode": "steam"}
+
     executable = find_game_executable(mod_root)
     if executable:
         try:
@@ -483,28 +507,6 @@ def launch_game(mod_root: Path) -> dict:
         except OSError as error:
             raise ValueError(f"启动求生之路 2 失败：{error}") from error
         return {"ok": True, "mode": "direct", "executable": str(executable)}
-
-    if os.name == "nt":
-        startfile = getattr(os, "startfile", None)
-        if startfile:
-            try:
-                startfile(GAME_STEAM_URI)
-            except OSError as error:
-                raise ValueError("找不到求生之路 2 的程序，且无法通过 Steam 启动") from error
-            return {"ok": True, "mode": "steam"}
-
-    steam = shutil.which("steam")
-    if steam:
-        try:
-            subprocess.Popen(
-                [steam, GAME_STEAM_URI],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except OSError as error:
-            raise ValueError(f"通过 Steam 启动求生之路 2 失败：{error}") from error
-        return {"ok": True, "mode": "steam"}
 
     raise ValueError("找不到求生之路 2 的启动程序，请先选择正确的 addons 目录")
 
