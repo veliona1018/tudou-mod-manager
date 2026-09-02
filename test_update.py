@@ -22,19 +22,19 @@ class UpdateTests(unittest.TestCase):
 
     def test_update_info_marks_newer_release(self):
         release = {
-            "version": "0.3",
-            "versionKey": (0, 3, 0),
-            "name": "土豆管理器 v0.3",
-            "releaseUrl": "https://github.com/veliona1018/tudou-mod-manager/releases/tag/v0.3",
+            "version": "0.31",
+            "versionKey": (0, 31, 0),
+            "name": "土豆管理器 v0.31",
+            "releaseUrl": "https://github.com/veliona1018/tudou-mod-manager/releases/tag/v0.31",
             "publishedAt": "2026-08-28T00:00:00Z",
             "notes": "测试版本",
-            "assetName": "-v0.3.zip",
+            "assetName": "-v0.31.zip",
             "assetSize": 123,
         }
         with patch("mod_server._latest_release", return_value=release):
             result = update_info()
         self.assertTrue(result["updateAvailable"])
-        self.assertEqual(result["latestVersion"], "0.3")
+        self.assertEqual(result["latestVersion"], "0.31")
 
     def test_update_asset_prefers_manager_executable(self):
         assets = [

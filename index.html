@@ -96,7 +96,12 @@
         </div>
 
         <div id="notice" class="notice hidden"></div>
-        <section id="mod-grid" class="mod-grid" aria-live="polite"></section>
+        <section id="mod-grid" class="mod-grid" aria-live="polite">
+          <div class="catalog-loading" role="status" aria-live="polite">
+            <span class="operation-spinner" aria-hidden="true"></span>
+            <span>正在读取资源…</span>
+          </div>
+        </section>
       </section>
     </main>
     <div id="operation-overlay" class="operation-overlay hidden" role="status" aria-live="polite" aria-label="正在处理操作">
@@ -279,6 +284,17 @@
         <button id="settings-close" class="icon-button" type="button" title="关闭" aria-label="关闭设置"><i data-lucide="x"></i></button>
       </div>
       <div class="settings-content">
+        <section class="settings-section" aria-labelledby="appearance-settings-section-title">
+          <h3 id="appearance-settings-section-title">界面外观</h3>
+          <div class="settings-form">
+            <label class="settings-label" for="theme-select">界面主题</label>
+            <select id="theme-select" class="settings-input">
+              <option value="dark">黑色</option>
+              <option value="light">白色</option>
+            </select>
+            <div id="theme-status" class="settings-status" role="status" aria-live="polite"></div>
+          </div>
+        </section>
         <section class="settings-section" aria-labelledby="ai-settings-section-title">
           <h3 id="ai-settings-section-title">AI 设置</h3>
           <div class="settings-form">
@@ -312,6 +328,6 @@
       </div>
     </aside>
     <script src="https://unpkg.com/lucide@latest"></script>
-    <script src="app.js?v=20260827"></script>
+    <script src="app.js?v=20260902"></script>
   </body>
 </html>

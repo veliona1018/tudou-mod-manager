@@ -3,6 +3,7 @@ const state = {
 };
 
 const NAV_ORDER_STORAGE_KEY = "l4d2-mod-manager.nav-order";
+const THEME_STORAGE_KEY = "l4d2-mod-manager.theme";
 
 const labels = {
   map: "地图",
@@ -61,6 +62,8 @@ const settingsPanel = document.querySelector("#settings-panel");
 const aiModelSelect = document.querySelector("#ai-model-select");
 const deepseekKeyInput = document.querySelector("#deepseek-key-input");
 const settingsStatus = document.querySelector("#settings-status");
+const themeSelect = document.querySelector("#theme-select");
+const themeStatus = document.querySelector("#theme-status");
 const updateAutoCheck = document.querySelector("#update-auto-check");
 const updateCurrentVersion = document.querySelector("#update-current-version");
 const updateCheckButton = document.querySelector("#update-check-button");
@@ -133,6 +136,7 @@ let activeAiMod = null;
 let aiPrompts = { default: null, custom: [] };
 let aiHistory = [];
 let operationBusy = false;
+let catalogLoaded = false;
 let latestUpdateInfo = null;
 let sprayAssets = [];
 let sprayAssignments = {};
@@ -360,6 +364,18 @@ function runExclusiveOperation(message, task) {
       operationOverlay.classList.add("hidden");
       document.body.removeAttribute("aria-busy");
     });
+}
+
+function normalizeTheme(value) {
+  return value === "light" ? "light" : "dark";
+}
+
+function applyTheme(theme, persist = true) {
+  const normalized = normalizeTheme(theme);
+  document.documentElement.dataset.theme = normalized;
+  if (persist) localStorage.setItem(THEME_STORAGE_KEY, normalized);
+  if (themeSelect) themeSelect.value = normalized;
+  return normalized;
 }
 
 async function checkForSourceChanges() {
@@ -1715,6 +1731,13 @@ async function getUpdateConfig() {
   return result;
 }
 
+async function getThemeConfig() {
+  const response = await fetch("/api/theme/config", { cache: "no-store" });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+  return result;
+}
+
 async function checkForUpdates({ automatic = false } = {}) {
   if (!automatic) {
     updateStatus.textContent = "正在检查更新…";
@@ -1767,15 +1790,23 @@ async function openSettings() {
   settingsPanel.classList.remove("hidden");
   settingsStatus.textContent = "正在读取配置…";
   try {
-    const [config, updateConfig] = await Promise.all([getAiConfig(), getUpdateConfig()]);
+    const [config, updateConfig, themeConfig] = await Promise.all([getAiConfig(), getUpdateConfig(), getThemeConfig()]);
     aiModelSelect.value = config.model || "deepseek-chat";
     deepseekKeyInput.value = "";
     settingsStatus.textContent = config.configured ? "API Key 已配置" : "尚未配置 API Key";
     updateAutoCheck.checked = updateConfig.autoCheck !== false;
     updateCurrentVersion.textContent = `v${updateConfig.currentVersion}`;
+    const theme = applyTheme(themeConfig.theme, true);
+    themeStatus.textContent = theme === "light" ? "已使用白色主题" : "已使用黑色主题";
   } catch (error) {
     settingsStatus.textContent = `读取失败：${error.message}`;
   }
+}
+
+async function saveTheme(theme) {
+  const result = await postJson("/api/theme/config", { theme });
+  const savedTheme = applyTheme(result.theme, true);
+  themeStatus.textContent = savedTheme === "light" ? "已使用白色主题" : "已使用黑色主题";
 }
 
 function closeSettings() {
@@ -2090,12 +2121,17 @@ async function handleCardActionInner(button) {
 
 async function loadCatalog(force = false) {
   notice.classList.add("hidden");
+  const firstLoad = !catalogLoaded;
+  if (firstLoad) {
+    grid.innerHTML = `<div class="catalog-loading" role="status" aria-live="polite"><span class="operation-spinner" aria-hidden="true"></span><span>正在读取资源…</span></div>`;
+  }
   try {
     const route = force ? `/api/catalog?refresh=${Date.now()}` : "/api/catalog";
     const response = await fetch(route, { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
     state.mods = payload.mods || [];
+    catalogLoaded = true;
     sprayAssetsNeedRefresh = true;
     refreshModelConflictState();
     rootPath.textContent = payload.root || "当前工作目录";
@@ -2104,7 +2140,9 @@ async function loadCatalog(force = false) {
     return state.mods;
   } catch (error) {
     showNotice(`目录读取失败：${error.message}`);
-    grid.innerHTML = "";
+    if (firstLoad) {
+      grid.innerHTML = `<div class="empty">资源读取失败，请稍后刷新目录</div>`;
+    }
   }
 }
 
@@ -2359,6 +2397,20 @@ aiDeletePromptButton.addEventListener("click", () => runExclusiveOperation("正�
 document.querySelector("#settings-nav").addEventListener("click", openSettings);
 sidebarToggleButton.addEventListener("click", toggleSidebar);
 document.querySelector("#settings-close").addEventListener("click", closeSettings);
+themeSelect.addEventListener("change", () => {
+  if (operationBusy) return;
+  const previous = normalizeTheme(document.documentElement.dataset.theme);
+  const next = normalizeTheme(themeSelect.value);
+  applyTheme(next);
+  runExclusiveOperation("正在保存界面主题，请稍候…", async () => {
+    try {
+      await saveTheme(next);
+    } catch (error) {
+      applyTheme(previous);
+      themeStatus.textContent = `保存失败：${error.message}`;
+    }
+  });
+});
 document.querySelector("#ai-settings-save").addEventListener("click", () => runExclusiveOperation("正在保存 AI 设置，请稍候…", saveAiSettings));
 document.querySelector("#ai-settings-clear").addEventListener("click", () => runExclusiveOperation("正在清除 API Key，请稍候…", clearAiKey));
 updateAutoCheck.addEventListener("change", () => {
@@ -2550,6 +2602,7 @@ document.addEventListener("keydown", (event) => {
 });
 
 restoreSidebarState();
+applyTheme(normalizeTheme(localStorage.getItem(THEME_STORAGE_KEY)), false);
 const initialNavOrder = restoreNavOrder();
 restoreNavOrderFromServer(initialNavOrder);
 initializeNavDragging();

@@ -86,6 +86,8 @@ SETTINGS_KEY_DEEPSEEK_MODEL = "deepseekModel"
 SETTINGS_KEY_AI_PROMPTS = "aiPrompts"
 SETTINGS_KEY_AUTO_UPDATE_CHECK = "autoUpdateCheck"
 SETTINGS_KEY_NAV_ORDER = "navOrder"
+SETTINGS_KEY_THEME = "theme"
+THEMES = {"dark", "light"}
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_MODELS = {"deepseek-chat", "deepseek-reasoner"}
@@ -223,6 +225,25 @@ def save_auto_update_check(enabled: bool) -> None:
     settings = _read_settings()
     settings[SETTINGS_KEY_AUTO_UPDATE_CHECK] = bool(enabled)
     target.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def ui_theme() -> str:
+    value = _read_settings().get(SETTINGS_KEY_THEME, "dark")
+    return value if isinstance(value, str) and value in THEMES else "dark"
+
+
+def save_ui_theme(theme: str) -> None:
+    if not isinstance(theme, str) or theme not in THEMES:
+        raise ValueError("界面主题设置无效")
+    target = settings_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    settings = _read_settings()
+    settings[SETTINGS_KEY_THEME] = theme
+    target.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def theme_config() -> dict:
+    return {"theme": ui_theme()}
 
 
 def update_config() -> dict:
@@ -1389,6 +1410,9 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
         if request_path == "/api/update/config":
             self._send_json(200, update_config())
             return
+        if request_path == "/api/theme/config":
+            self._send_json(200, theme_config())
+            return
         if request_path == "/api/navigation/order":
             self._send_json(200, {"order": navigation_order()})
             return
@@ -1551,6 +1575,13 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
                     raise ValueError("自动检查更新设置无效")
                 save_auto_update_check(enabled)
                 self._send_json(200, update_config())
+                return
+
+            if route == "/api/theme/config":
+                payload = self._read_json()
+                theme = str(payload.get("theme", "")).strip().casefold()
+                save_ui_theme(theme)
+                self._send_json(200, {"ok": True, **theme_config()})
                 return
 
             if route == "/api/navigation/order":
