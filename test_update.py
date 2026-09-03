@@ -22,30 +22,30 @@ class UpdateTests(unittest.TestCase):
 
     def test_update_info_marks_newer_release(self):
         release = {
-            "version": "0.31",
-            "versionKey": (0, 31, 0),
-            "name": "土豆管理器 v0.31",
-            "releaseUrl": "https://github.com/veliona1018/tudou-mod-manager/releases/tag/v0.31",
+            "version": "0.32",
+            "versionKey": (0, 32, 0),
+            "name": "土豆管理器 v0.32",
+            "releaseUrl": "https://github.com/veliona1018/tudou-mod-manager/releases/tag/v0.32",
             "publishedAt": "2026-08-28T00:00:00Z",
             "notes": "测试版本",
-            "assetName": "-v0.31.zip",
+            "assetName": "TudouManager-v0.32.exe",
             "assetSize": 123,
         }
         with patch("mod_server._latest_release", return_value=release):
             result = update_info()
         self.assertTrue(result["updateAvailable"])
-        self.assertEqual(result["latestVersion"], "0.31")
+        self.assertEqual(result["latestVersion"], "0.32")
 
     def test_update_asset_prefers_manager_executable(self):
         assets = [
-            {"name": "TudouManager-v0.3.exe", "browser_download_url": "https://github.com/example/release.exe"},
+            {"name": "TudouManager-v0.31.exe", "browser_download_url": "https://github.com/example/release.exe"},
             {"name": "source.zip", "browser_download_url": "https://github.com/example/source.zip"},
         ]
-        self.assertEqual(_select_update_asset(assets)["name"], "TudouManager-v0.3.exe")
+        self.assertEqual(_select_update_asset(assets)["name"], "TudouManager-v0.31.exe")
 
     def test_update_asset_falls_back_to_zip(self):
-        assets = [{"name": "TudouManager-v0.3.zip", "browser_download_url": "https://github.com/example/update.zip"}]
-        self.assertEqual(_select_update_asset(assets)["name"], "TudouManager-v0.3.zip")
+        assets = [{"name": "TudouManager-v0.31.zip", "browser_download_url": "https://github.com/example/update.zip"}]
+        self.assertEqual(_select_update_asset(assets)["name"], "TudouManager-v0.31.zip")
 
     def test_direct_executable_requires_pe_header(self):
         with tempfile.TemporaryDirectory() as temporary:

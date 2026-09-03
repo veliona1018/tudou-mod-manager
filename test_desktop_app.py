@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from desktop_app import app_profile_dir
+from desktop_app import app_profile_dir, acquire_single_instance, release_single_instance
 
 
 class DesktopAppTests(unittest.TestCase):
@@ -17,6 +17,24 @@ class DesktopAppTests(unittest.TestCase):
             self.assertEqual(first, second)
             self.assertEqual(first, Path(temporary) / "L4D2ModManager" / "BrowserProfile")
             self.assertTrue(first.is_dir())
+
+    @patch("desktop_app.os.name", "posix")
+    def test_non_windows_single_instance_fallback_is_releasable(self):
+        handle = acquire_single_instance()
+
+        self.assertTrue(handle)
+        release_single_instance(handle)
+
+    @unittest.skipUnless(os.name == "nt", "Windows mutex behavior is Windows-specific")
+    def test_windows_mutex_rejects_second_instance(self):
+        first = acquire_single_instance()
+        try:
+            second = acquire_single_instance()
+            self.assertIsNotNone(first)
+            self.assertIsNone(second)
+            release_single_instance(second)
+        finally:
+            release_single_instance(first)
 
 
 if __name__ == "__main__":

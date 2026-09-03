@@ -96,6 +96,7 @@ UPDATE_MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 UPDATE_ASSET_EXTENSIONS = {".exe", ".zip"}
 GAME_EXECUTABLE_NAME = "left4dead2.exe"
 GAME_STEAM_URI = "steam://rungameid/550"
+GAME_INSTALL_NAME = "Left 4 Dead 2"
 DEFAULT_AI_PROMPT = (
     "请分析这个求生之路 2（Left 4 Dead 2）Mod。根据提供的 VPK 内部路径和检测证据，"
     "用简体中文说明：1. 它大概是什么；2. 可能替换或影响什么内容；3. 判断依据；"
@@ -545,6 +546,100 @@ def _valid_folder(value: object) -> Path | None:
         return None
     folder = Path(value).expanduser().resolve()
     return folder if folder.is_dir() else None
+
+
+def _parse_steam_library_paths(contents: str) -> list[Path]:
+    """Extract Steam library roots from a libraryfolders.vdf file."""
+
+    paths: list[Path] = []
+    for match in re.finditer(r'"path"\s+"((?:\\.|[^"\\])*)"', contents, re.IGNORECASE):
+        raw_path = re.sub(r"\\([\\\"])", r"\1", match.group(1)).strip()
+        if raw_path:
+            paths.append(Path(raw_path))
+    return list(dict.fromkeys(paths))
+
+
+def _steam_registry_paths() -> list[Path]:
+    if os.name != "nt":
+        return []
+    try:
+        import winreg
+    except ImportError:
+        return []
+
+    locations = (
+        (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam", "InstallPath"),
+    )
+    paths: list[Path] = []
+    for hive, key_name, value_name in locations:
+        try:
+            with winreg.OpenKey(hive, key_name) as key:
+                value, _ = winreg.QueryValueEx(key, value_name)
+        except (FileNotFoundError, OSError):
+            continue
+        if isinstance(value, str) and value.strip():
+            paths.append(Path(value))
+    return list(dict.fromkeys(paths))
+
+
+def _steam_library_roots() -> list[Path]:
+    roots = _steam_registry_paths()
+    roots.extend(
+        Path(value) / "Steam"
+        for value in (
+            os.environ.get("ProgramFiles(x86)"),
+            os.environ.get("ProgramFiles"),
+            os.environ.get("LOCALAPPDATA"),
+        )
+        if value
+    )
+    roots.extend(
+        Path(drive) / "Steam"
+        for drive in (f"{letter}:\\" for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ")
+        if (Path(drive) / "Steam").is_dir()
+    )
+
+    libraries: list[Path] = []
+    for root in roots:
+        root = root.expanduser()
+        if root.name.casefold() == "steam":
+            libraries.append(root)
+        library_file = root / "steamapps" / "libraryfolders.vdf"
+        try:
+            libraries.extend(_parse_steam_library_paths(library_file.read_text(encoding="utf-8")))
+        except (OSError, UnicodeError):
+            continue
+    return list(dict.fromkeys(path.resolve() for path in libraries if path.is_dir()))
+
+
+def find_l4d2_mod_folders() -> list[Path]:
+    """Find installed L4D2 addons directories through Steam's known libraries."""
+
+    candidates: list[Path] = []
+    for library in _steam_library_roots():
+        candidate = library / "steamapps" / "common" / GAME_INSTALL_NAME / INTEGRATION_GAME_DIR / "addons"
+        if candidate.is_dir():
+            candidates.append(candidate.resolve())
+    return list(dict.fromkeys(candidates))
+
+
+def _rank_game_mod_folders(candidates: list[Path], current: Path | None = None) -> list[Path]:
+    current_resolved = current.resolve() if current else None
+
+    def score(folder: Path) -> tuple[int, int, int]:
+        try:
+            vpk_count = sum(1 for path in folder.iterdir() if path.is_file() and path.suffix.casefold() in VPK_EXTENSIONS)
+        except OSError:
+            vpk_count = 0
+        return (
+            1 if current_resolved and folder.resolve() == current_resolved else 0,
+            min(vpk_count, 10000),
+            1 if (folder / "workshop").is_dir() else 0,
+        )
+
+    return sorted(candidates, key=score, reverse=True)
 
 
 def default_folder(fallback: Path) -> Path:
@@ -2130,6 +2225,24 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
                 self._invalidate_catalog()
                 save_last_folder(selected_path)
                 self._send_json(200, {"ok": True, "root": str(selected_path)})
+                return
+
+            if route == "/api/find-game-folder":
+                candidates = _rank_game_mod_folders(find_l4d2_mod_folders(), self.mod_root)
+                if not candidates:
+                    raise ValueError("没有找到 Left 4 Dead 2 的 addons 目录，请确认游戏已安装")
+                selected_path = candidates[0]
+                self.server.mod_root = selected_path
+                self._invalidate_catalog()
+                save_last_folder(selected_path)
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "root": str(selected_path),
+                        "candidates": [str(path) for path in candidates],
+                    },
+                )
                 return
 
             if route == "/api/import":

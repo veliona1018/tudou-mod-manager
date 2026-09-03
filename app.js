@@ -1637,9 +1637,17 @@ function refreshModelConflictState() {
 }
 
 function getModelTargets(mod) {
+  const primaryCategories = effectivePrimaryCategories(mod);
+  const characterTargets = (mod.characterTargets || []).filter((target) => (
+    (target.side === "survivor" && primaryCategories.includes("survivor_model"))
+    || (target.side === "infected" && primaryCategories.includes("infected_model"))
+  ));
+  const weaponTargets = primaryCategories.includes("weapon_model")
+    ? (mod.weaponTargets || []).map((target) => ({ ...target, side: "weapon" }))
+    : [];
   return [
-    ...(mod.characterTargets || []),
-    ...(mod.weaponTargets || []).map((target) => ({ ...target, side: "weapon" })),
+    ...characterTargets,
+    ...weaponTargets,
   ].filter((target) => target.side && target.id);
 }
 
@@ -2198,6 +2206,23 @@ async function resetFolderInner() {
   }
 }
 
+async function findGameFolder() {
+  if (operationBusy) return;
+  return runExclusiveOperation("正在查找求生之路 2，请稍候…", async () => {
+    try {
+      showNotice("正在查找求生之路 2 的 addons 目录…");
+      const response = await fetch("/api/find-game-folder", { method: "POST" });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+      await loadCatalog();
+      const count = result.candidates?.length || 1;
+      showNotice(`已切换到：${result.root}${count > 1 ? `（找到 ${count} 个游戏目录，已选择 Mod 较多的目录）` : ""}`, true);
+    } catch (error) {
+      showNotice(`自动查找失败：${error.message}`);
+    }
+  });
+}
+
 async function importArchive(file) {
   if (operationBusy) return;
   try {
@@ -2428,6 +2453,7 @@ updateCheckButton.addEventListener("click", () => runExclusiveOperation("正在�
 updateInstallButton.addEventListener("click", () => runExclusiveOperation("正在下载更新，请稍候…", installUpdate));
 document.querySelector("#refresh-button").addEventListener("click", refreshCatalog);
 document.querySelector("#change-folder-button").addEventListener("click", changeFolder);
+document.querySelector("#find-game-folder-button").addEventListener("click", findGameFolder);
 document.querySelector("#reset-folder-button").addEventListener("click", resetFolder);
 document.querySelector("#refresh-button-top").addEventListener("click", refreshCatalog);
 launchGameButton.addEventListener("click", launchGame);

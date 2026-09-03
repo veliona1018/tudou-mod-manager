@@ -16,6 +16,41 @@ from mod_server import load_last_folder, resource_root, run_server
 
 
 APP_TITLE = "土豆 Mod 管理器"
+SINGLE_INSTANCE_MUTEX = "Local\\TudouModManager.SingleInstance"
+
+
+def acquire_single_instance() -> object | None:
+    """Return a process-held Windows mutex, or None when another app is running."""
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.GetLastError.restype = ctypes.c_ulong
+        handle = kernel32.CreateMutexW(None, True, SINGLE_INSTANCE_MUTEX)
+        if not handle:
+            return True
+        if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(handle)
+            return None
+        return handle
+    except (AttributeError, OSError, TypeError):
+        # A native API failure should not prevent the manager from opening.
+        return True
+
+
+def release_single_instance(handle: object | None) -> None:
+    if os.name != "nt" or not handle or handle is True:
+        return
+    try:
+        import ctypes
+
+        ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(handle)
+    except (AttributeError, OSError, TypeError):
+        return
 
 
 def find_browser() -> str | None:
@@ -275,48 +310,56 @@ def main() -> None:
         run_server(root, args.port, resource_root())
         return
 
-    root = args.folder.resolve() if args.folder else load_last_folder(Path.cwd().resolve())
-    if not root.is_dir():
-        raise SystemExit(f"Mod folder does not exist: {root}")
-
-    browser = find_browser()
-    if args.check:
-        print(f"folder={root}")
-        print(f"browser={browser or 'system default browser'}")
+    instance_handle = acquire_single_instance()
+    if instance_handle is None:
+        log("Mod manager is already running.")
         return
 
-    port = find_port()
-    project_root = resource_root()
-    server_process = start_server(root, port)
-    url = f"http://127.0.0.1:{port}/"
-    log(f"Opening Mod manager: {url}")
-    browser_process, _profile_dir = open_app_window(url)
-    stop_event = threading.Event()
-    state_lock = threading.Lock()
-    state = {"process": server_process}
-    watcher = None
-    if not args.no_watch and not getattr(sys, "frozen", False):
-        watcher = threading.Thread(
-            target=watch_server,
-            args=(project_root, root, port, state, state_lock, stop_event),
-            daemon=True,
-        )
-        watcher.start()
     try:
-        if browser_process:
-            wait_for_browser_window()
-        else:
-            input("Press Enter to stop the Mod manager... ")
-    except KeyboardInterrupt:
-        pass
+        root = args.folder.resolve() if args.folder else load_last_folder(Path.cwd().resolve())
+        if not root.is_dir():
+            raise SystemExit(f"Mod folder does not exist: {root}")
+
+        browser = find_browser()
+        if args.check:
+            print(f"folder={root}")
+            print(f"browser={browser or 'system default browser'}")
+            return
+
+        port = find_port()
+        project_root = resource_root()
+        server_process = start_server(root, port)
+        url = f"http://127.0.0.1:{port}/"
+        log(f"Opening Mod manager: {url}")
+        browser_process, _profile_dir = open_app_window(url)
+        stop_event = threading.Event()
+        state_lock = threading.Lock()
+        state = {"process": server_process}
+        watcher = None
+        if not args.no_watch and not getattr(sys, "frozen", False):
+            watcher = threading.Thread(
+                target=watch_server,
+                args=(project_root, root, port, state, state_lock, stop_event),
+                daemon=True,
+            )
+            watcher.start()
+        try:
+            if browser_process:
+                wait_for_browser_window()
+            else:
+                input("Press Enter to stop the Mod manager... ")
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if browser_process and browser_process.poll() is None:
+                browser_process.terminate()
+            stop_event.set()
+            if watcher:
+                watcher.join(timeout=2)
+            with state_lock:
+                stop_server(state["process"])
     finally:
-        if browser_process and browser_process.poll() is None:
-            browser_process.terminate()
-        stop_event.set()
-        if watcher:
-            watcher.join(timeout=2)
-        with state_lock:
-            stop_server(state["process"])
+        release_single_instance(instance_handle)
 
 
 if __name__ == "__main__":
