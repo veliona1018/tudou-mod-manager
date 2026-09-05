@@ -38,6 +38,7 @@ from nekovpk import (
 from voice_replacement import (
     VoiceReplacementError,
     detect_voice_replacement_mode,
+    detect_voice_roles,
     inspect_voice_package,
     install_voice_package,
     restore_voice_package,
@@ -45,6 +46,7 @@ from voice_replacement import (
 from vpk_detector import (
     VPKClassificationError,
     analyze_vpk,
+    analyze_vpk_paths,
     classify_paths,
     read_vpk_file,
     read_vpk_paths,
@@ -519,6 +521,33 @@ class VPKDetectorTests(unittest.TestCase):
         self.assertEqual(voice["primary"], "voice_replacement")
         self.assertIn("sound", voice["categories"])
 
+    def test_model_category_requires_a_concrete_character_target(self):
+        survivor_without_target = classify_paths([
+            "models/survivors/survivor_fan.mdl",
+            "models/survivors/survivor_fan.vvd",
+        ])
+        self.assertNotIn("survivor_model", survivor_without_target["categories"])
+        self.assertNotEqual(survivor_without_target["primary"], "survivor_model")
+        self.assertEqual(survivor_without_target["characterTargets"], [])
+
+        animation_only = classify_paths([
+            "models/survivors/gestures_teenangst.mdl",
+            "models/survivors/anim_teenangst_part1.mdl",
+        ])
+        self.assertNotIn("survivor_model", animation_only["categories"])
+        self.assertEqual(animation_only["characterTargets"], [])
+
+        infected_without_target = classify_paths([
+            "models/infected/infected_custom.mdl",
+            "models/infected/infected_custom.vvd",
+        ])
+        self.assertNotIn("infected_model", infected_without_target["categories"])
+        self.assertEqual(infected_without_target["characterTargets"], [])
+
+        concrete_target = classify_paths(["models/survivors/survivor_coach.mdl"])
+        self.assertIn("survivor_model", concrete_target["categories"])
+        self.assertEqual(concrete_target["characterTargets"][0]["id"], "coach")
+
     def test_detects_voice_replacement_mode(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -542,6 +571,61 @@ class VPKDetectorTests(unittest.TestCase):
             )
             self.assertEqual(detect_voice_replacement_mode(automatic), "automatic")
             self.assertEqual(detect_voice_replacement_mode(manual), "manual")
+
+    def test_detects_infected_voice_replacement(self):
+        paths = [
+            "sound/player/boomer/voice/warn/male_boomer_warning_01.wav",
+            "sound/player/boomer/voice/vomit/female_boomer_vomit_01.wav",
+        ]
+        detection = classify_paths(paths)
+        self.assertEqual(detection["primary"], "voice_replacement")
+        self.assertEqual(
+            detect_voice_roles(paths),
+            [{
+                "id": "boomer",
+                "name": "Boomer",
+                "side": "infected",
+                "fileCount": 2,
+                "sourceType": "wav",
+                "archiveFiles": [],
+            }],
+        )
+
+    def test_detects_role_named_nested_voice_archive(self):
+        paths = ["coach.7z"]
+        self.assertEqual(classify_paths(paths)["primary"], "voice_replacement")
+        self.assertEqual(detect_voice_replacement_mode("unused.vpk", paths), "manual")
+        self.assertEqual(
+            detect_voice_roles(paths),
+            [{
+                "id": "coach",
+                "name": "Coach",
+                "side": "survivor",
+                "fileCount": 0,
+                "sourceType": "archive",
+                "archiveFiles": ["coach.7z"],
+            }],
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "left4dead2" / "addons"
+            root.mkdir(parents=True)
+            (root / "2914696195.vpk").write_bytes(make_vpk_files({"coach.7z": b"archive"}))
+            (root / "2914696195.jpg").write_bytes(b"preview")
+            mod = build_catalog(root)[0]
+            self.assertEqual(mod["voiceModes"], ["manual"])
+            self.assertEqual(mod["voiceRoles"][0]["id"], "coach")
+            self.assertIn("archive", mod["primaryCategories"])
+            info = inspect_voice_package(root, mod)
+            self.assertTrue(info["manualOnly"])
+            self.assertEqual(info["sourceArchiveCount"], 1)
+            self.assertFalse(info["roles"][0]["installable"])
+
+        self.assertEqual(
+            classify_paths(["voice/coach.tar.gz"])["primary"],
+            "voice_replacement",
+        )
+        self.assertEqual(classify_paths(["materials/models/coach/accessory.7z"])["primary"], "texture")
 
     def test_classifies_ui_scripts_and_environment_models(self):
         self.assertEqual(
@@ -577,13 +661,42 @@ class VPKDetectorTests(unittest.TestCase):
             [
                 "models/weapons/melee/w_pitchfork.mdl",
                 "models/weapons/melee/v_frying_pan.mdl",
+                "models/weapons/melee/v_shovel.mdl",
                 "models/v_models/v_snip_awp.mdl",
                 "models/v_models/v_desert_rifle.mdl",
             ]
         )["weaponTargets"]
         self.assertEqual(
             [(target["id"], target["name"]) for target in melee_and_special],
-            [("awp", "AWP 狙击枪"), ("scar", "SCAR-L"), ("pitchfork", "干草叉"), ("frying_pan", "平底锅")],
+            [("awp", "AWP 狙击枪"), ("scar", "SCAR-L"), ("pitchfork", "干草叉"), ("frying_pan", "平底锅"), ("shovel", "铲子")],
+        )
+
+    def test_distinguishes_specific_smg_targets_from_generic_smg(self):
+        mp5 = classify_paths([
+            "models/v_models/v_smg_mp5.mdl",
+            "models/w_models/weapons/w_smg_mp5.mdl",
+        ])
+        self.assertEqual(
+            [(target["id"], target["name"]) for target in mp5["weaponTargets"]],
+            [("smg_mp5", "MP5")],
+        )
+
+        silenced = classify_paths([
+            "models/v_models/v_silenced_smg.mdl",
+            "models/w_models/weapons/w_smg_a.mdl",
+        ])
+        self.assertEqual(
+            [(target["id"], target["name"]) for target in silenced["weaponTargets"]],
+            [("smg_silenced", "Mac-10")],
+        )
+
+        generic = classify_paths([
+            "models/v_models/v_smg.mdl",
+            "models/w_models/weapons/w_smg_uzi.mdl",
+        ])
+        self.assertEqual(
+            [(target["id"], target["name"]) for target in generic["weaponTargets"]],
+            [("smg", "Uzi")],
         )
 
     def test_environment_names_do_not_create_character_targets(self):
@@ -732,6 +845,23 @@ class VPKDetectorTests(unittest.TestCase):
             self.assertEqual(catalog[0]["id"], "sample")
             self.assertEqual(catalog[0]["vpkFiles"], ["sample.vpk1"])
             self.assertFalse(catalog[0]["enabled"])
+
+    def test_catalog_reuses_unchanged_vpk_analysis_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "first.vpk").write_bytes(make_vpk(["maps/c1m1_hotel.bsp"]))
+            cache = {}
+
+            with patch("mod_catalog.analyze_vpk_paths", wraps=analyze_vpk_paths) as analyze:
+                build_catalog(root, vpk_cache=cache)
+                build_catalog(root, vpk_cache=cache)
+                self.assertEqual(analyze.call_count, 1)
+
+                (root / "second.vpk").write_bytes(make_vpk(["maps/c2m1_highway.bsp"]))
+                build_catalog(root, vpk_cache=cache)
+                self.assertEqual(analyze.call_count, 2)
+
+            self.assertEqual(set(cache), {"first.vpk", "second.vpk"})
 
     def test_workshop_mods_are_scanned_and_copied_to_workspace(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1035,6 +1165,25 @@ class VPKDetectorTests(unittest.TestCase):
             decoded_pixels = [pixels[index:index + 4] for index in range(0, len(pixels), 4)]
             self.assertTrue(all(pixel[0] == 255 and pixel[1] == 0 and pixel[2] <= 8 and pixel[3] == 255 for pixel in decoded_pixels))
 
+    def test_dxt3_vtf_can_be_decoded_for_spray_preview(self):
+        width = height = 4
+        header = bytearray(64)
+        struct.pack_into("<4sII", header, 0, b"VTF\x00", 7, 1)
+        struct.pack_into("<I", header, 12, 64)
+        struct.pack_into("<HH", header, 16, width, height)
+        struct.pack_into("<I", header, 52, 14)  # DXT3
+        header[56] = 1
+        struct.pack_into("<I", header, 57, 13)
+        alpha = bytes([0x0F, 0x5A, 0xAA, 0xFF, 0x00, 0x11, 0x22, 0x33])
+        color = struct.pack("<HHI", 0xF800, 0x07E0, 0)
+
+        width, height, pixels = _decode_vtf(bytes(header) + alpha + color)
+        self.assertEqual((width, height), (4, 4))
+        self.assertEqual(tuple(pixels[:4]), (255, 0, 0, 255))
+        self.assertEqual(tuple(pixels[4:8]), (255, 0, 0, 0))
+        self.assertEqual(tuple(pixels[8:12]), (255, 0, 0, 170))
+        self.assertEqual(tuple(pixels[12:16]), (255, 0, 0, 85))
+
     def test_imported_spray_vtf_pads_rectangular_images_to_power_of_two_square(self):
         from PIL import Image
 
@@ -1205,11 +1354,46 @@ class VPKDetectorTests(unittest.TestCase):
             )
             gradient_result = apply_spray_collection(root, build_catalog(root), {"3": red["id"]})
             gradient_vtf = read_vpk_file(root / gradient_result["vpk"], "materials/vgui/logos/3.vtf")
+            gradient_vmt = read_vpk_file(root / gradient_result["vpk"], "materials/vgui/logos/3.vmt").decode("ascii")
             self.assertEqual(struct.unpack_from("<HH", gradient_vtf, 16), (512, 512))
             self.assertEqual(struct.unpack_from("<H", gradient_vtf, 24)[0], 1)
             self.assertEqual(struct.unpack_from("<I", gradient_vtf, 20)[0], 0x220C)
             self.assertEqual(gradient_vtf[56], 5)
             self.assertEqual(gradient_vtf[63], 1)
+            self.assertIn('"LightmappedGeneric"', gradient_vmt)
+            self.assertNotIn('"AnimatedTexture"', gradient_vmt)
+
+    def test_unconfigured_imported_gif_uses_website_compatible_animation_layout(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_buffer = io.BytesIO()
+            Image.new("RGBA", (8, 8), (255, 0, 0, 255)).save(
+                image_buffer,
+                format="GIF",
+                save_all=True,
+                append_images=[Image.new("RGBA", (8, 8), (0, 0, 255, 255))],
+                loop=0,
+            )
+            import_spray_images(
+                root,
+                [{"name": "默认动态.gif", "data": base64.b64encode(image_buffer.getvalue()).decode("ascii")}],
+            )
+            asset = next(
+                item
+                for item in list_spray_assets(root, build_catalog(root))["assets"]
+                if item["sourceType"] == "imported"
+            )
+            result = apply_spray_collection(root, build_catalog(root), {"1": asset["id"]})
+            vtf = read_vpk_file(root / result["vpk"], "materials/vgui/logos/1.vtf")
+            vmt = read_vpk_file(root / result["vpk"], "materials/vgui/logos/1.vmt").decode("ascii")
+            self.assertEqual(struct.unpack_from("<II", vtf, 4), (7, 1))
+            self.assertEqual(struct.unpack_from("<HH", vtf, 16), (252, 256))
+            self.assertEqual(struct.unpack_from("<H", vtf, 24)[0], 2)
+            self.assertEqual(struct.unpack_from("<I", vtf, 52)[0], 13)
+            self.assertEqual(vtf[56], 1)
+            self.assertIn('"AnimatedTexture"', vmt)
 
     def test_imported_spray_can_be_deleted_and_unassigned(self):
         from PIL import Image

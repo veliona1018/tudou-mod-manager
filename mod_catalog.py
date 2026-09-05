@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import re
 from pathlib import Path
@@ -10,7 +11,7 @@ from pathlib import Path
 from vpk_detector import (
     VPKClassificationError,
     VPKFormatError,
-    analyze_vpk,
+    analyze_vpk_paths,
     read_vpk_addon_title,
     read_vpk_paths,
 )
@@ -29,6 +30,7 @@ IGNORED_DATA_DIRECTORIES = {
     ".l4d2_voice_backups",
 }
 METADATA_FILE = ".l4d2_mod_manager.json"
+VPK_ANALYSIS_VERSION = 2
 PART_SUFFIX = re.compile(r"(?:[ _.-]?(?:part|vol|chunk)[ _.-]?\d+)$", re.IGNORECASE)
 NUMBER_SUFFIX = re.compile(r"^(.*?)[ _.-]?\d{1,2}$")
 SERIES_SUFFIX = re.compile(
@@ -262,8 +264,58 @@ def save_hidden_tags(root: str | Path, hidden: dict[str, dict[str, str]]) -> Non
     )
 
 
-def build_catalog(root: str | Path) -> list[dict]:
+def _vpk_cache_signature(path: Path) -> tuple[int, int]:
+    stat = path.stat()
+    return stat.st_size, stat.st_mtime_ns
+
+
+def _cached_vpk_analysis(
+    path: Path,
+    root_path: Path,
+    cache: dict[str, dict[str, object]],
+) -> dict[str, object]:
+    """Read and classify one VPK only when its on-disk signature changed."""
+
+    cache_key = path.relative_to(root_path).as_posix()
+    signature = _vpk_cache_signature(path)
+    cached = cache.get(cache_key)
+    if (
+        cached
+        and cached.get("signature") == signature
+        and cached.get("analysisVersion") == VPK_ANALYSIS_VERSION
+    ):
+        return cached
+
+    record: dict[str, object] = {
+        "signature": signature,
+        "analysisVersion": VPK_ANALYSIS_VERSION,
+        "internalPaths": [],
+        "title": None,
+        "detection": None,
+        "errorType": None,
+        "error": None,
+    }
+    try:
+        internal_paths = read_vpk_paths(path)
+        record["internalPaths"] = internal_paths
+        record["title"] = read_vpk_addon_title(path)
+        record["detection"] = analyze_vpk_paths(path, internal_paths, record["title"])
+    except VPKClassificationError as error:
+        record["errorType"] = "classification"
+        record["error"] = str(error)
+    except (OSError, VPKFormatError) as error:
+        record["errorType"] = "format"
+        record["error"] = str(error)
+    cache[cache_key] = record
+    return record
+
+
+def build_catalog(
+    root: str | Path,
+    vpk_cache: dict[str, dict[str, object]] | None = None,
+) -> list[dict]:
     root_path = Path(root)
+    cache = vpk_cache if vpk_cache is not None else {}
     all_files = [
         path
         for path in root_path.rglob("*")
@@ -284,6 +336,13 @@ def build_catalog(root: str | Path) -> list[dict]:
     marked_tags = load_marked_tags(root_path)
     hidden_tags = load_hidden_tags(root_path)
 
+    current_cache_keys = {
+        path.relative_to(root_path).as_posix()
+        for path in vpk_files
+    }
+    for cache_key in set(cache) - current_cache_keys:
+        cache.pop(cache_key, None)
+
     images_by_key: dict[str, list[Path]] = {}
     for image in image_files:
         images_by_key.setdefault(_key(image.stem), []).append(image)
@@ -295,12 +354,9 @@ def build_catalog(root: str | Path) -> list[dict]:
     package_signals: dict[Path, dict[str, object]] = {}
     addon_titles: dict[Path, str] = {}
     for path in vpk_files:
-        try:
-            internal_paths = read_vpk_paths(path)
-            title = read_vpk_addon_title(path)
-        except (OSError, VPKFormatError):
-            internal_paths = []
-            title = None
+        analysis = _cached_vpk_analysis(path, root_path, cache)
+        internal_paths = analysis["internalPaths"]
+        title = analysis["title"]
         package_signals[path] = {
             "title": title,
             "titleKey": _key(title) if title else "",
@@ -325,24 +381,46 @@ def build_catalog(root: str | Path) -> list[dict]:
         if left_root != right_root:
             parent[right_root] = left_root
 
-    for index, left in enumerate(vpk_files):
-        left_signals = package_signals[left]
-        for right in vpk_files[index + 1 :]:
-            right_signals = package_signals[right]
-            left_series = _metadata_series_name(str(left_signals["title"])) if left_signals["title"] else None
-            right_series = _metadata_series_name(str(right_signals["title"])) if right_signals["title"] else None
-            same_series = bool(left_series and right_series and _key(left_series) == _key(right_series))
-            same_title = bool(left_signals["titleKey"] and left_signals["titleKey"] == right_signals["titleKey"])
-            same_mission = bool(left_signals["missions"] & right_signals["missions"])
-            same_map_family = bool(left_signals["mapFamilies"] & right_signals["mapFamilies"])
-            has_metadata_anchor = bool(
-                left_signals["title"]
-                or right_signals["title"]
-                or left_signals["missions"]
-                or right_signals["missions"]
-            )
-            if same_series or same_title or same_mission or (same_map_family and has_metadata_anchor):
-                union(left, right)
+    def union_buckets(buckets: dict[str, list[Path]]) -> None:
+        for members in buckets.values():
+            if len(members) < 2:
+                continue
+            first = members[0]
+            for member in members[1:]:
+                union(first, member)
+
+    series_buckets: dict[str, list[Path]] = {}
+    title_buckets: dict[str, list[Path]] = {}
+    mission_buckets: dict[str, list[Path]] = {}
+    map_family_buckets: dict[str, list[Path]] = {}
+    for path in vpk_files:
+        signals = package_signals[path]
+        title = signals["title"]
+        if title:
+            series = _metadata_series_name(str(title))
+            if series:
+                series_buckets.setdefault(_key(series), []).append(path)
+            if signals["titleKey"]:
+                title_buckets.setdefault(str(signals["titleKey"]), []).append(path)
+        for mission in signals["missions"]:
+            mission_buckets.setdefault(str(mission), []).append(path)
+        for map_family in signals["mapFamilies"]:
+            map_family_buckets.setdefault(str(map_family), []).append(path)
+
+    union_buckets(series_buckets)
+    union_buckets(title_buckets)
+    union_buckets(mission_buckets)
+    for members in map_family_buckets.values():
+        if len(members) < 2:
+            continue
+        has_metadata_anchor = any(
+            package_signals[path]["title"] or package_signals[path]["missions"]
+            for path in members
+        )
+        if has_metadata_anchor:
+            first = members[0]
+            for member in members[1:]:
+                union(first, member)
 
     component_paths: dict[Path, list[Path]] = {}
     for path in vpk_files:
@@ -406,44 +484,11 @@ def build_catalog(root: str | Path) -> list[dict]:
         errors: list[dict] = []
         detections: list[dict] = []
         for vpk in files:
-            internal_paths: list[str] = []
-            embedded_archives: list[str] = []
-            try:
-                internal_paths = read_vpk_paths(vpk)
-                embedded_archives = _embedded_archive_paths(internal_paths)
-                pure_archive = _is_pure_archive_package(internal_paths, embedded_archives)
-                detection = analyze_vpk(vpk)
-                if pure_archive:
-                    detection["categories"] = sorted(set(detection.get("categories", [])) | {"archive"})
-                    detection["signals"] = {
-                        **detection.get("signals", {}),
-                        "archive": embedded_archives[:12],
-                    }
-                    detection["embeddedArchives"] = embedded_archives
-                if any(
-                    path.startswith("nekovpk/") and path.endswith(".neko7z")
-                    for path in internal_paths
-                ):
-                    try:
-                        detection["nekovpk"] = {
-                            **inspect_nekovpk(vpk),
-                            "vpkPath": vpk.relative_to(root_path).as_posix(),
-                        }
-                    except (NekoVPKError, OSError, VPKFormatError) as error:
-                        detection["nekovpk"] = {
-                            "format": "nekovpk",
-                            "vpkPath": vpk.relative_to(root_path).as_posix(),
-                            "error": str(error),
-                            "targets": [],
-                        }
-                if "voice_replacement" in detection.get("categories", []):
-                    detection["voiceRoles"] = detect_voice_roles(internal_paths)
-                    voice_mode = detect_voice_replacement_mode(vpk, internal_paths)
-                    if voice_mode:
-                        detection["voiceMode"] = voice_mode
-                        detection["categories"].append(f"voice_{voice_mode}")
-                detections.append(detection)
-            except VPKClassificationError as error:
+            analysis = _cached_vpk_analysis(vpk, root_path, cache)
+            internal_paths = analysis["internalPaths"]
+            embedded_archives = _embedded_archive_paths(internal_paths)
+            pure_archive = _is_pure_archive_package(internal_paths, embedded_archives)
+            if analysis["errorType"] == "classification":
                 if pure_archive:
                     detections.append(
                         {
@@ -459,9 +504,43 @@ def build_catalog(root: str | Path) -> list[dict]:
                         }
                     )
                 else:
-                    errors.append({"file": vpk.name, "error": str(error)})
-            except (OSError, VPKFormatError) as error:
-                errors.append({"file": vpk.name, "error": str(error)})
+                    errors.append({"file": vpk.name, "error": analysis["error"]})
+                continue
+            if analysis["errorType"]:
+                errors.append({"file": vpk.name, "error": analysis["error"]})
+                continue
+
+            detection = copy.deepcopy(analysis["detection"])
+            if pure_archive:
+                detection["categories"] = sorted(set(detection.get("categories", [])) | {"archive"})
+                detection["signals"] = {
+                    **detection.get("signals", {}),
+                    "archive": embedded_archives[:12],
+                }
+                detection["embeddedArchives"] = embedded_archives
+            if any(
+                path.startswith("nekovpk/") and path.endswith(".neko7z")
+                for path in internal_paths
+            ):
+                try:
+                    detection["nekovpk"] = {
+                        **inspect_nekovpk(vpk),
+                        "vpkPath": vpk.relative_to(root_path).as_posix(),
+                    }
+                except (NekoVPKError, OSError, VPKFormatError) as error:
+                    detection["nekovpk"] = {
+                        "format": "nekovpk",
+                        "vpkPath": vpk.relative_to(root_path).as_posix(),
+                        "error": str(error),
+                        "targets": [],
+                    }
+            if "voice_replacement" in detection.get("categories", []):
+                detection["voiceRoles"] = detect_voice_roles(internal_paths)
+                voice_mode = detect_voice_replacement_mode(vpk, internal_paths)
+                if voice_mode:
+                    detection["voiceMode"] = voice_mode
+                    detection["categories"].append(f"voice_{voice_mode}")
+            detections.append(detection)
 
         categories = sorted(
             {

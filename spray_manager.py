@@ -555,6 +555,37 @@ def _decode_dxt5(data: bytes, width: int, height: int) -> bytes:
     return bytes(output)
 
 
+def _decode_dxt3(data: bytes, width: int, height: int) -> bytes:
+    """Decode DXT3 blocks, which store explicit 4-bit alpha values."""
+
+    output = bytearray(width * height * 4)
+    blocks_wide = (width + 3) // 4
+    for block_y in range((height + 3) // 4):
+        for block_x in range(blocks_wide):
+            offset = (block_y * blocks_wide + block_x) * 16
+            alpha_data = data[offset:offset + 8]
+            color0, color1, color_indices = struct.unpack_from("<HHI", data, offset + 8)
+            colors = [_rgb565(color0), _rgb565(color1)]
+            colors.extend(
+                (
+                    tuple((2 * colors[0][channel] + colors[1][channel]) // 3 for channel in range(3)),
+                    tuple((colors[0][channel] + 2 * colors[1][channel]) // 3 for channel in range(3)),
+                )
+            )
+            alpha_bits = int.from_bytes(alpha_data, "little")
+            for local_y in range(4):
+                for local_x in range(4):
+                    x, y = block_x * 4 + local_x, block_y * 4 + local_y
+                    if x >= width or y >= height:
+                        continue
+                    pixel_index = local_y * 4 + local_x
+                    color_index = (color_indices >> (2 * pixel_index)) & 3
+                    alpha = ((alpha_bits >> (4 * pixel_index)) & 0xF) * 17
+                    target = (y * width + x) * 4
+                    output[target:target + 4] = bytes((*colors[color_index], alpha))
+    return bytes(output)
+
+
 def _mip_size(image_format: int, width: int, height: int) -> int:
     if image_format in {13}:
         return ((width + 3) // 4) * ((height + 3) // 4) * 8
@@ -623,10 +654,10 @@ def _decode_vtf(data: bytes) -> tuple[int, int, bytes]:
                 value = pixels[index]
                 rgba = (255, 255, 255, value)
             decoded[index * 4:index * 4 + 4] = bytes(rgba)
+    elif image_format == 14:
+        decoded = _decode_dxt3(pixels, width, height)
     elif image_format == 15:
         decoded = _decode_dxt5(pixels, width, height)
-    elif image_format == 14:
-        raise SprayError("暂不支持 DXT3 喷漆预览")
     else:
         raise SprayError(f"暂不支持的 VTF 图像格式：{image_format}")
     return width, height, bytes(decoded)
@@ -753,6 +784,18 @@ def _dynamic_imported_spray_vmt(slot: str, frame_rate: float = 10.0) -> bytes:
         '\t}\n'
         '}\n'
     ).encode("ascii")
+
+
+def _encode_imported_gif_vtf(path: Path) -> tuple[bytes, float]:
+    """Encode a GIF using the website-compatible multi-frame VTF layout."""
+
+    try:
+        from gif_to_vtf import encode_frames_to_vtf_bytes
+        frames, durations = _load_imported_gif_frames(path)
+        frames, tick = _expand_timed_frames_with_tick(frames, durations)
+        return encode_frames_to_vtf_bytes(frames), 1000 / tick
+    except (ImportError, OSError, ValueError) as error:
+        raise SprayError(f"生成动态喷漆失败：{error}") from error
 
 
 def _fit_spray_frame(image, max_dimension=MAX_SPRAY_VTF_DIMENSION):
@@ -1264,26 +1307,25 @@ def apply_spray_collection(
                 vtf = _encode_imported_vtf(imported_path, configuration["frame"])
                 vmt = None
             elif configuration and configuration["mode"] == "dynamic":
-                try:
-                    from gif_to_vtf import encode_frames_to_vtf_bytes
-                    frames, tick = _configured_spray_frame_data(root_path, configuration)
-                    vtf = encode_frames_to_vtf_bytes(frames)
-                except (ImportError, OSError, ValueError) as error:
-                    raise SprayError(f"生成动态喷漆失败：{error}") from error
+                from gif_to_vtf import encode_frames_to_vtf_bytes
+                frames, tick = _configured_spray_frame_data(root_path, configuration)
+                vtf = encode_frames_to_vtf_bytes(frames)
                 vmt = _dynamic_imported_spray_vmt(slot_name, 1000 / tick)
             elif configuration and configuration["mode"] == "gradient":
                 try:
                     vtf = _encode_gradient_vtf(root_path, configuration)
                 except (ImportError, OSError, ValueError) as error:
                     raise SprayError(f"生成渐变喷漆失败：{error}") from error
-                vmt = _dynamic_imported_spray_vmt(slot_name)
+                # A gradient is selected by VTF mipmaps as distance changes;
+                # AnimatedTexture would incorrectly treat it as a time animation.
+                vmt = None
             else:
-                vtf = _encode_imported_vtf(imported_path)
-                vmt = (
-                    _dynamic_imported_spray_vmt(slot_name)
-                    if Path(asset["importedPath"]).suffix.casefold() == ".gif"
-                    else None
-                )
+                if Path(asset["importedPath"]).suffix.casefold() == ".gif":
+                    vtf, frame_rate = _encode_imported_gif_vtf(imported_path)
+                    vmt = _dynamic_imported_spray_vmt(slot_name, frame_rate)
+                else:
+                    vtf = _encode_imported_vtf(imported_path)
+                    vmt = None
         else:
             vpk = (root_path / asset["vpkPath"]).resolve()
             vtf = read_vpk_file(vpk, asset["vtfPath"])

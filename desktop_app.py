@@ -12,6 +12,7 @@ import time
 import webbrowser
 from pathlib import Path
 
+from app_logging import close_logging, write_log
 from mod_server import load_last_folder, resource_root, run_server
 
 
@@ -78,6 +79,7 @@ def find_port() -> int:
 
 def log(message: str) -> None:
     """Write diagnostics when a console is available."""
+    write_log(message, component="launcher")
     if sys.stdout is not None:
         print(message)
 
@@ -360,6 +362,7 @@ def main() -> None:
                 stop_server(state["process"])
     finally:
         release_single_instance(instance_handle)
+        close_logging()
 
 
 if __name__ == "__main__":

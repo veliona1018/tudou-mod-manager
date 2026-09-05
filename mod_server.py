@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -24,6 +25,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from ctypes import wintypes
 
 from app_version import APP_VERSION, UPDATE_REPOSITORY
+from app_logging import close_logging, log_path, write_log
 
 from folder_picker import choose_folder
 
@@ -454,6 +456,7 @@ def resource_root() -> Path:
 
 def log(message: str) -> None:
     """Write diagnostics when a console is available."""
+    write_log(message, component="server")
     if sys.stdout is not None:
         print(message)
 
@@ -545,7 +548,22 @@ def _valid_folder(value: object) -> Path | None:
     if not isinstance(value, str) or not value.strip():
         return None
     folder = Path(value).expanduser().resolve()
+    # Never restore a whole drive as the Mod root. It can trigger an enormous
+    # scan and the manager data directory cannot normally be created there.
+    if folder.parent == folder:
+        return None
     return folder if folder.is_dir() else None
+
+
+def _validate_mod_folder(folder: Path) -> Path:
+    """Validate a user-selected folder before it becomes the active root."""
+
+    selected = folder.expanduser().resolve()
+    if not selected.is_dir():
+        raise ValueError("选择的目录不存在")
+    if selected.parent == selected:
+        raise ValueError("请选择具体的 Mod 文件夹，不要选择 C:\\、D:\\ 这样的磁盘根目录")
+    return selected
 
 
 def _parse_steam_library_paths(contents: str) -> list[Path]:
@@ -1431,9 +1449,22 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
 
     def _catalog(self, refresh: bool = False) -> list[dict]:
         ensure_manager_data_layout(self.mod_root)
+        current_root = self.mod_root.resolve()
+        if getattr(self.server, "catalog_cache_root", None) != current_root:
+            self.server.vpk_analysis_cache = {}
+            self.server.catalog_cache_root = current_root
         cached = getattr(self.server, "catalog_cache", None)
         if refresh or cached is None:
-            cached = build_catalog(self.mod_root)
+            started = time.monotonic()
+            log(f"开始扫描 Mod 目录：{self.mod_root}（refresh={refresh}）")
+            vpk_cache = getattr(self.server, "vpk_analysis_cache", None)
+            if vpk_cache is None:
+                vpk_cache = {}
+                self.server.vpk_analysis_cache = vpk_cache
+            cached = build_catalog(
+                self.mod_root,
+                vpk_cache=vpk_cache,
+            )
             installations = {
                 str(item.get("modId")): item
                 for item in load_voice_installations(self.mod_root)
@@ -1445,6 +1476,7 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
                 mod["voiceInstalled"] = record is not None
                 mod["voiceInstallationId"] = record.get("id") if record else None
             self.server.catalog_cache = cached
+            log(f"完成扫描 Mod 目录：{len(cached)} 个 Mod，耗时 {time.monotonic() - started:.2f} 秒")
         return cached
 
     def _invalidate_catalog(self) -> None:
@@ -1625,20 +1657,29 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
             self.wfile.write(content)
             return
         if request_path == "/api/catalog":
-            refresh = "refresh" in parse_qs(urlsplit(self.path).query)
-            payload = json.dumps(
-                {
-                    "root": str(self.mod_root),
-                    "defaultRoot": str(default_folder(Path.cwd())),
-                    "mods": self._catalog(refresh),
-                },
-                ensure_ascii=False,
-            ).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            try:
+                refresh = "refresh" in parse_qs(urlsplit(self.path).query)
+                payload = json.dumps(
+                    {
+                        "root": str(self.mod_root),
+                        "defaultRoot": str(default_folder(Path.cwd())),
+                        "mods": self._catalog(refresh),
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            except (OSError, ValueError, UnicodeError) as error:
+                write_log(
+                    f"GET /api/catalog 失败：{error}；目录：{self.mod_root}",
+                    component="server",
+                    error=True,
+                    exc_info=True,
+                )
+                self._send_json(400, {"error": f"无法读取 Mod 目录：{error}"})
             return
         if request_path == "/api/workshop/scan":
             self._send_json(200, scan_workshop_mods(self.mod_root))
@@ -1663,6 +1704,14 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:
         route = urlsplit(self.path).path
         try:
+            if route == "/api/client-log":
+                payload = self._read_json()
+                context = str(payload.get("context", "未知位置"))[:120]
+                message = str(payload.get("message", "未知错误"))[:500]
+                write_log(f"{context}：{message}", component="client", error=True)
+                self._send_json(200, {"ok": True})
+                return
+
             if route == "/api/update/config":
                 payload = self._read_json()
                 enabled = payload.get("autoCheck")
@@ -2208,11 +2257,17 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
                 if not selected:
                     self._send_json(200, {"ok": False, "cancelled": True})
                     return
-                selected_path = Path(selected).resolve()
-                if not selected_path.is_dir():
-                    raise ValueError("选择的目录不存在")
+                selected_path = _validate_mod_folder(Path(selected))
+                previous_root = self.server.mod_root
                 self.server.mod_root = selected_path
                 self._invalidate_catalog()
+                try:
+                    # Do not persist a folder until its first catalog scan succeeds.
+                    self._catalog(refresh=True)
+                except (OSError, ValueError, UnicodeError) as error:
+                    self.server.mod_root = previous_root
+                    self._invalidate_catalog()
+                    raise ValueError(f"无法读取所选 Mod 目录：{error}") from error
                 save_last_folder(selected_path)
                 self._send_json(200, {"ok": True, "root": str(selected_path)})
                 return
@@ -2287,27 +2342,45 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
         except UpdateError as error:
             self._send_json(400, {"error": str(error)})
         except VoiceReplacementConflict as error:
+            write_log(f"POST {route} 冲突：{error}", component="server", error=True)
             self._send_json(409, {"error": str(error), "conflicts": error.conflicts})
         except (OSError, ValueError, json.JSONDecodeError, zipfile.BadZipFile, tarfile.TarError) as error:
+            write_log(f"POST {route} 失败：{error}", component="server", error=True)
             self._send_json(400, {"error": str(error)})
+        except Exception as error:
+            write_log(f"POST {route} 未处理异常：{error}", component="server", error=True, exc_info=True)
+            self._send_json(500, {"error": "后台处理失败，请查看日志文件"})
+
+
+class LoggingThreadingHTTPServer(ThreadingHTTPServer):
+    def handle_error(self, request, client_address) -> None:
+        write_log(
+            f"未处理请求异常：{client_address}",
+            component="server",
+            error=True,
+            exc_info=True,
+        )
+        super().handle_error(request, client_address)
 
 
 def run_server(root: Path, port: int = 8765, static_root: Path | None = None) -> None:
     root = root.resolve()
     handler = type("ConfiguredModRequestHandler", (ModRequestHandler,), {"root": root})
-    server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    server = LoggingThreadingHTTPServer(("127.0.0.1", port), handler)
     server.mod_root = root
     server.static_root = (static_root or resource_root()).resolve()
     server.catalog_cache = None
     server.spray_assets_cache = None
     log(f"Mod catalog: http://127.0.0.1:{port}/")
     log(f"Scanning: {root}")
+    log(f"日志文件：{log_path()}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         log("\nStopping Mod catalog")
     finally:
         server.server_close()
+        close_logging()
 
 
 def main() -> None:

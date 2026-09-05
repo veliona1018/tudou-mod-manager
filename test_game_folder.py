@@ -6,6 +6,7 @@ from unittest.mock import patch
 from mod_server import (
     _parse_steam_library_paths,
     _rank_game_mod_folders,
+    _validate_mod_folder,
     find_l4d2_mod_folders,
 )
 
@@ -51,6 +52,16 @@ class GameFolderTests(unittest.TestCase):
 
             self.assertEqual(_rank_game_mod_folders([empty, full])[0], full)
             self.assertEqual(_rank_game_mod_folders([empty, full], empty)[0], empty)
+
+    def test_rejects_a_filesystem_root_as_mod_folder(self):
+        root = Path(Path.cwd().anchor)
+        with self.assertRaisesRegex(ValueError, "不要选择"):
+            _validate_mod_folder(root)
+
+    def test_accepts_a_specific_mod_folder(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            selected = _validate_mod_folder(Path(temporary))
+            self.assertEqual(selected, Path(temporary).resolve())
 
 
 if __name__ == "__main__":

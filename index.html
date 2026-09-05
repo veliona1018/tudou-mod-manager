@@ -24,14 +24,14 @@
           <button class="nav-item" data-nav-id="survivor-target" data-category="survivor_target" draggable="true" type="button"><i data-lucide="scan-face"></i>模型</button>
           <button class="nav-item" data-nav-id="voice" data-category="voice_replacement" draggable="true" type="button"><i data-lucide="audio-lines"></i>语音替换</button>
           <button class="nav-item" data-nav-id="spray" data-category="spray" draggable="true" type="button"><i data-lucide="image"></i>喷漆</button>
-          <button id="settings-nav" class="nav-item" data-nav-id="settings" draggable="true" type="button"><i data-lucide="settings-2"></i>设置</button>
+          <button id="settings-nav" class="nav-item" data-nav-id="settings" draggable="true" type="button" aria-expanded="false"><i data-lucide="settings-2"></i>设置</button>
         </nav>
 
         <div class="sidebar-footer">
           <div class="folder-label"><i data-lucide="folder-open"></i>当前目录</div>
           <div id="root-path" class="root-path">正在读取...</div>
           <button id="change-folder-button" class="outline-button" type="button"><i data-lucide="folder-cog"></i>更改目录</button>
-          <button id="find-game-folder-button" class="outline-button" type="button"><i data-lucide="scan-search"></i>自动查找游戏</button>
+          <button id="find-game-folder-button" class="outline-button" type="button"><i data-lucide="scan-search"></i>自动查找 Mod 目录</button>
           <button id="reset-folder-button" class="outline-button" type="button"><i data-lucide="folder-heart"></i>恢复默认目录</button>
           <button id="refresh-button" class="outline-button" type="button"><i data-lucide="refresh-cw"></i>刷新目录</button>
         </div>
@@ -78,6 +78,10 @@
               <button class="role-filter active" data-role-side="survivor" type="button">生还者模型</button>
               <button class="role-filter" data-role-side="infected" type="button">感染者模型</button>
               <button class="role-filter" data-role-side="weapon" type="button">武器模型</button>
+            </div>
+            <div id="voice-role-filters" class="filters role-filters hidden" role="tablist" aria-label="语音类型">
+              <button class="voice-role-filter active" data-voice-side="survivor" type="button">生还者语音</button>
+              <button class="voice-role-filter" data-voice-side="infected" type="button">感染者语音</button>
             </div>
           </div>
           <div id="selection-actions" class="selection-actions hidden" aria-label="批量操作">

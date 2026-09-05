@@ -36,9 +36,10 @@ WEAPON_TARGETS = (
     ("ak47", "ak47", "AK-47"),
     ("scar", "scar", "SCAR-L"),
     ("sg552", "sg552", "SG552"),
-    ("smg_mp5", "smg_mp5", "MP5 冲锋枪"),
-    ("smg_silenced", "smg_silenced", "消音冲锋枪"),
-    ("smg", "smg", "冲锋枪"),
+    ("smg_mp5", "smg_mp5", "MP5"),
+    ("smg_silenced", "smg_silenced", "Mac-10"),
+    ("silenced_smg", "smg_silenced", "Mac-10"),
+    ("smg", "smg", "Uzi"),
     ("m60", "m60", "M60 重机枪"),
     ("autoshotgun", "autoshotgun", "自动霰弹枪"),
     ("pumpshotgun", "pumpshotgun", "泵动霰弹枪"),
@@ -51,6 +52,7 @@ WEAPON_TARGETS = (
     ("chainsaw", "chainsaw", "电锯"),
     ("riotshield", "riotshield", "防暴盾牌"),
     ("crowbar", "crowbar", "撬棍"),
+    ("shovel", "shovel", "铲子"),
     ("pitchfork", "pitchfork", "干草叉"),
     ("frying_pan", "frying_pan", "平底锅"),
     ("machete", "machete", "砍刀"),
@@ -84,6 +86,74 @@ INFECTED_TARGETS = (
     ("witch", "witch", "Witch"),
 )
 SCRIPT_EXTENSIONS = (".nut", ".txt", ".lst", ".cfg")
+ARCHIVE_EXTENSIONS = (".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar")
+VOICE_ARCHIVE_ROLE_ALIASES = {
+    "namvet": ("namvet", "bill"),
+    "biker": ("biker", "francis"),
+    "manager": ("manager", "louis"),
+    "teengirl": ("teengirl", "zoey"),
+    "coach": ("coach",),
+    "gambler": ("gambler", "nick"),
+    "mechanic": ("mechanic", "ellis"),
+    "producer": ("producer", "rochelle"),
+    "boomer": ("boomer",),
+    "hunter": ("hunter",),
+    "smoker": ("smoker",),
+    "charger": ("charger",),
+    "jockey": ("jockey",),
+    "spitter": ("spitter",),
+    "tank": ("tank",),
+    "witch": ("witch",),
+}
+INFECTED_VOICE_PATH_ROLES = frozenset(
+    {"boomer", "hunter", "smoker", "charger", "jockey", "spitter", "tank", "witch"}
+)
+
+
+def is_direct_voice_path(raw_path: str) -> bool:
+    """Return whether a VPK path contains a directly loadable voice WAV."""
+
+    path = raw_path.replace("\\", "/").casefold()
+    if not path.endswith(".wav"):
+        return False
+    if path.startswith(("sound/player/survivor/voice/", "sound/player/infected/voice/", "sound/vo/")):
+        return True
+    parts = path.split("/")
+    return (
+        len(parts) >= 6
+        and parts[:2] == ["sound", "player"]
+        and parts[3] == "voice"
+        and parts[2] in INFECTED_VOICE_PATH_ROLES
+    )
+
+
+def detect_voice_archive_roles(paths: list[str]) -> dict[str, list[str]]:
+    """Find role-named archives commonly used by manual voice packages."""
+
+    detected: dict[str, list[str]] = {}
+    for raw_path in paths:
+        path = raw_path.replace("\\", "/").casefold()
+        if Path(path).suffix not in ARCHIVE_EXTENSIONS:
+            continue
+        stem = Path(path).stem
+        while True:
+            for suffix in sorted(ARCHIVE_EXTENSIONS, key=len, reverse=True):
+                if stem.endswith(suffix):
+                    stem = stem[: -len(suffix)].rstrip(".")
+                    break
+            else:
+                break
+        tokens = {token for token in re.split(r"[^a-z0-9]+", stem) if token}
+        voice_context = path.count("/") == 0 or path.startswith(("voice/", "sound/"))
+        for role, aliases in VOICE_ARCHIVE_ROLE_ALIASES.items():
+            exact_match = stem in aliases and voice_context
+            named_voice_match = bool(tokens & set(aliases)) and bool(
+                tokens & {"voice", "voices", "sound", "sounds", "audio", "dialog", "dialogue"}
+            )
+            if exact_match or named_voice_match:
+                detected.setdefault(role, []).append(path)
+                break
+    return {role: sorted(set(files)) for role, files in detected.items()}
 
 
 class VPKFormatError(ValueError):
@@ -293,14 +363,20 @@ def identify_character_targets(paths: list[str]) -> list[dict]:
             continue
 
         for pattern, target_id, display_name in SURVIVOR_TARGETS:
-            if pattern in lower_path and is_survivor_resource:
+            has_named_target = pattern in lower_path or re.search(
+                rf"(?<![a-z0-9]){re.escape(target_id)}(?![a-z0-9])", lower_path
+            )
+            if has_named_target and is_survivor_resource:
                 key = ("survivor", target_id)
                 found.setdefault(
                     key,
                     {"side": "survivor", "id": target_id, "name": display_name, "evidence": []},
                 )["evidence"].append(path)
         for pattern, target_id, display_name in INFECTED_TARGETS:
-            if pattern in lower_path and is_infected_resource:
+            has_named_target = pattern in lower_path or re.search(
+                rf"(?<![a-z0-9]){re.escape(target_id)}(?![a-z0-9])", lower_path
+            )
+            if has_named_target and is_infected_resource:
                 key = ("infected", target_id)
                 found.setdefault(
                     key,
@@ -320,13 +396,24 @@ def identify_weapon_targets(paths: list[str]) -> list[dict]:
         lower_path = path.lower()
         if not lower_path.startswith(WEAPON_MODEL_PREFIXES) or not lower_path.endswith(MODEL_EXTENSIONS):
             continue
-        for pattern, target_id, display_name in WEAPON_TARGETS:
-            if pattern not in lower_path:
-                continue
-            found.setdefault(
-                target_id,
-                {"id": target_id, "name": display_name, "evidence": []},
-            )["evidence"].append(path)
+        matches = [item for item in WEAPON_TARGETS if item[0] in lower_path]
+        if not matches:
+            continue
+        # Generic names such as `smg` are fallbacks. Choose the longest
+        # matching pattern for each path so one model file cannot create two
+        # different weapon targets (for example MP5 and generic SMG).
+        pattern, target_id, display_name = max(matches, key=lambda item: len(item[0]))
+        found.setdefault(
+            target_id,
+            {"id": target_id, "name": display_name, "evidence": []},
+        )["evidence"].append(path)
+
+    # Some packs use a generic world-model filename alongside a specific
+    # first-person filename. The specific target is authoritative in that
+    # case; retaining `smg` would create a false conflict.
+    specific_smg_targets = {"smg_mp5", "smg_silenced"}
+    if found.keys() & specific_smg_targets:
+        found.pop("smg", None)
 
     for target in found.values():
         target["evidence"] = target["evidence"][:12]
@@ -337,6 +424,9 @@ def classify_paths(paths: list[str]) -> dict:
     """Classify an add-on from its internal paths using explainable heuristics."""
 
     normalized = sorted(set(path.replace("\\", "/").lower() for path in paths))
+    voice_archive_roles = detect_voice_archive_roles(normalized)
+    character_targets = identify_character_targets(normalized)
+    concrete_sides = {target["side"] for target in character_targets}
     signals: dict[str, list[str]] = {
         "map": [],
         "survivor_model": [],
@@ -361,9 +451,15 @@ def classify_paths(paths: list[str]) -> dict:
 
         if path.endswith(MODEL_EXTENSIONS) and path.startswith("models/"):
             if path.startswith(("models/survivors/", "models/player/survivor/")):
-                signals["survivor_model"].append(path)
+                if "survivor" in concrete_sides:
+                    signals["survivor_model"].append(path)
+                else:
+                    signals["prop_model"].append(path)
             elif path.startswith(("models/infected/", "models/player/infected/")):
-                signals["infected_model"].append(path)
+                if "infected" in concrete_sides:
+                    signals["infected_model"].append(path)
+                else:
+                    signals["prop_model"].append(path)
             elif path.startswith(WEAPON_MODEL_PREFIXES):
                 signals["weapon_model"].append(path)
             else:
@@ -373,13 +469,7 @@ def classify_paths(paths: list[str]) -> dict:
             signals["spray"].append(path)
         if path.startswith("sound/"):
             signals["sound"].append(path)
-            if path.startswith(
-                (
-                    "sound/player/survivor/voice/",
-                    "sound/player/infected/voice/",
-                    "sound/vo/",
-                )
-            ):
+            if is_direct_voice_path(path):
                 signals["voice_replacement"].append(path)
         if path.startswith(("materials/", "particles/")):
             signals["texture"].append(path)
@@ -387,6 +477,9 @@ def classify_paths(paths: list[str]) -> dict:
             signals["ui"].append(path)
         if path.startswith("scripts/") and path.endswith(SCRIPT_EXTENSIONS):
             signals["script"].append(path)
+
+    for archive_paths in voice_archive_roles.values():
+        signals["voice_replacement"].extend(archive_paths)
 
     # A single BSP or model is more meaningful than thousands of supporting materials.
     scores = {
@@ -427,8 +520,6 @@ def classify_paths(paths: list[str]) -> dict:
     else:
         primary = ranked[0] if ranked else "unknown"
     confidence = "high" if ranked and scores[primary] >= 3 else "medium" if ranked else "low"
-    character_targets = identify_character_targets(normalized)
-
     return {
         "primary": primary,
         "categories": ranked,
@@ -441,9 +532,8 @@ def classify_paths(paths: list[str]) -> dict:
     }
 
 
-def analyze_vpk(file_path: str | Path) -> dict:
+def analyze_vpk_paths(file_path: str | Path, paths: list[str], addon_title: str | None = None) -> dict:
     path = Path(file_path)
-    paths = read_vpk_paths(path)
     result = classify_paths(paths)
     if result["primary"] == "unknown":
         raise VPKClassificationError(
@@ -453,10 +543,16 @@ def analyze_vpk(file_path: str | Path) -> dict:
         {
             "file": str(path),
             "name": path.name,
-            "addonTitle": read_vpk_addon_title(path),
+            "addonTitle": addon_title,
         }
     )
     return result
+
+
+def analyze_vpk(file_path: str | Path) -> dict:
+    path = Path(file_path)
+    paths = read_vpk_paths(path)
+    return analyze_vpk_paths(path, paths, read_vpk_addon_title(path))
 
 
 def main() -> None:

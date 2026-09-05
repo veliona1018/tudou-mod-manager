@@ -1,4 +1,4 @@
-"""Safe installation and restoration for survivor voice replacement VPKs.
+"""Safe installation and restoration for voice replacement VPKs.
 
 The original package ships a batch file disguised as ``addoninfo.txt``.  This
 module reproduces its path rules without executing content from the VPK.
@@ -15,7 +15,7 @@ import shutil
 import uuid
 
 from nekovpk import read_vpk_entries
-from vpk_detector import read_vpk_file, read_vpk_paths
+from vpk_detector import detect_voice_archive_roles, is_direct_voice_path, read_vpk_file, read_vpk_paths
 from manager_storage import VOICE_BACKUP_DIR, ensure_manager_data_layout, migrate_voice_backup_path
 
 
@@ -33,6 +33,17 @@ VOICE_ROLES = {
     "mechanic": "Ellis",
     "producer": "Rochelle",
 }
+INFECTED_VOICE_ROLES = {
+    "boomer": "Boomer",
+    "hunter": "Hunter",
+    "smoker": "Smoker",
+    "charger": "Charger",
+    "jockey": "Jockey",
+    "spitter": "Spitter",
+    "tank": "Tank",
+    "witch": "Witch",
+}
+VOICE_ROLE_NAMES = {**VOICE_ROLES, **INFECTED_VOICE_ROLES}
 TEAM_ONE = {"namvet", "biker", "manager", "teengirl"}
 TEAM_ONE_ROOTS = ("left4dead2", "left4dead2_dlc1", "left4dead2_dlc2", "left4dead2_dlc3")
 TEAM_TWO_ROOTS = ("left4dead2", "left4dead2_dlc1")
@@ -119,41 +130,52 @@ def _game_parent(mod_root: Path) -> Path:
 
 
 def _voice_paths(vpk_path: Path) -> list[str]:
-    return sorted(
-        path
-        for path in read_vpk_paths(vpk_path)
-        if path.startswith(VOICE_PREFIX) and path.endswith(".wav")
-    )
+    return _voice_paths_from_paths(read_vpk_paths(vpk_path))
+
+
+def _voice_paths_from_paths(paths: list[str]) -> list[str]:
+    return sorted(path for path in paths if is_direct_voice_path(path))
 
 
 def _group_voice_paths(paths: list[str]) -> dict[str, list[str]]:
     grouped: dict[str, list[str]] = {}
     for path in paths:
         parts = path.split("/")
-        if len(parts) != 6 or parts[:4] != ["sound", "player", "survivor", "voice"]:
+        if len(parts) < 6 or parts[:2] != ["sound", "player"] or parts[3] != "voice":
             continue
-        role = parts[4]
-        if role in VOICE_ROLES:
+        role = parts[2] if parts[2] in INFECTED_VOICE_ROLES else parts[4]
+        if role in VOICE_ROLE_NAMES:
             grouped.setdefault(role, []).append(path)
     return grouped
 
 
 def detect_voice_roles(paths: list[str]) -> list[dict]:
-    """Return survivor roles represented by voice paths in a VPK."""
+    """Return survivor or infected roles represented by WAVs or archives."""
 
     grouped = _group_voice_paths(paths)
+    archive_roles = detect_voice_archive_roles(paths)
     return [
-        {"id": role, "name": VOICE_ROLES[role], "fileCount": len(grouped[role])}
-        for role in VOICE_ROLES
-        if role in grouped
+        {
+            "id": role,
+            "name": VOICE_ROLE_NAMES[role],
+            "side": "infected" if role in INFECTED_VOICE_ROLES else "survivor",
+            "fileCount": len(grouped.get(role, [])),
+            "sourceType": "archive" if role not in grouped else "wav",
+            "archiveFiles": archive_roles.get(role, []),
+        }
+        for role in VOICE_ROLE_NAMES
+        if role in grouped or role in archive_roles
     ]
 
 
 def detect_voice_replacement_mode(file_path: str | Path, paths: list[str] | None = None) -> str | None:
     """Classify a voice VPK as a direct addon or an external install package."""
     paths = paths if paths is not None else read_vpk_paths(file_path)
-    if not any(path.startswith(VOICE_PREFIX) and path.endswith(".wav") for path in paths):
+    direct_voice = any(is_direct_voice_path(path) for path in paths)
+    if not direct_voice and not detect_voice_archive_roles(paths):
         return None
+    if not direct_voice:
+        return "manual"
     if any(Path(path).suffix.casefold() in {".bat", ".cmd"} for path in paths):
         return "manual"
     addoninfo = read_vpk_file(file_path, "addoninfo.txt") or b""
@@ -200,7 +222,8 @@ def _target_plan(game_parent: Path, role: str, source_paths: list[str]) -> dict:
         new_files += len(filenames) - existing
     return {
         "id": role,
-        "name": VOICE_ROLES[role],
+        "name": VOICE_ROLE_NAMES[role],
+        "side": "survivor",
         "sourceFileCount": len(source_paths),
         "targetDirectories": target_dirs,
         "overwriteCount": overwrite,
@@ -244,10 +267,14 @@ def _find_voice_vpk(mod_root: Path, mod: dict) -> Path:
         for relative in mod.get("vpkFiles", [])
         if Path(relative).suffix.casefold() in VPK_SUFFIXES
     ]
-    voice_candidates = [path for path in candidates if _voice_paths(path)]
+    voice_candidates = []
+    for path in candidates:
+        paths = read_vpk_paths(path)
+        if _voice_paths_from_paths(paths) or detect_voice_archive_roles(paths):
+            voice_candidates.append(path)
     if len(voice_candidates) != 1:
         if not voice_candidates:
-            raise VoiceReplacementError("这个 Mod 没有可识别的生还者语音文件")
+            raise VoiceReplacementError("这个 Mod 没有可识别的语音文件")
         raise VoiceReplacementError("一个 Mod 包含多个语音 VPK，暂不自动安装")
     return voice_candidates[0]
 
@@ -259,8 +286,47 @@ def inspect_voice_package(mod_root: str | Path, mod: dict) -> dict:
     ensure_manager_data_layout(root)
     vpk_path = _find_voice_vpk(root, mod)
     game_parent = _game_parent(root)
-    grouped = _group_voice_paths(_voice_paths(vpk_path))
-    roles = [_target_plan(game_parent, role, grouped[role]) for role in VOICE_ROLES if role in grouped]
+    paths = read_vpk_paths(vpk_path)
+    direct_paths = _voice_paths_from_paths(paths)
+    grouped = _group_voice_paths(direct_paths)
+    archive_roles = detect_voice_archive_roles(paths)
+    manual_only = not direct_paths and bool(archive_roles)
+    roles = []
+    for role in VOICE_ROLE_NAMES:
+        if role in grouped:
+            if role in VOICE_ROLES:
+                plan = _target_plan(game_parent, role, grouped[role])
+            else:
+                plan = {
+                    "id": role,
+                    "name": VOICE_ROLE_NAMES[role],
+                    "side": "infected",
+                    "sourceFileCount": len(grouped[role]),
+                    "targetDirectories": [],
+                    "overwriteCount": 0,
+                    "newCount": 0,
+                    "missingDirectories": [],
+                    "installable": False,
+                }
+            plan["sourceType"] = "wav"
+            plan["archiveFiles"] = archive_roles.get(role, [])
+            roles.append(plan)
+        elif role in archive_roles:
+            roles.append(
+                {
+                    "id": role,
+                    "name": VOICE_ROLE_NAMES[role],
+                    "side": "infected" if role in INFECTED_VOICE_ROLES else "survivor",
+                    "sourceFileCount": 0,
+                    "sourceType": "archive",
+                    "archiveFiles": archive_roles[role],
+                    "targetDirectories": [],
+                    "missingDirectories": [],
+                    "overwriteCount": 0,
+                    "newCount": 0,
+                    "installable": False,
+                }
+            )
     installations = load_voice_installations(root)
     current = next((item for item in installations if item.get("modId") == mod.get("id")), None)
     other = [item for item in installations if item.get("modId") != mod.get("id")]
@@ -271,6 +337,9 @@ def inspect_voice_package(mod_root: str | Path, mod: dict) -> dict:
         "gameRoot": _game_root(root).as_posix(),
         "gameParent": game_parent.as_posix(),
         "sourceFileCount": sum(len(paths) for paths in grouped.values()),
+        "sourceArchiveCount": sum(len(paths) for paths in archive_roles.values()),
+        "sourceFiles": sorted(archive_path for paths in archive_roles.values() for archive_path in paths),
+        "manualOnly": manual_only,
         "roles": roles,
         "installed": current is not None,
         "installationId": current.get("id") if current else None,

@@ -1,5 +1,5 @@
 const state = {
-  mods: [], category: "all", roleSide: "survivor", filter: "all", search: "", sort: "name", selectedIds: new Set(),
+  mods: [], category: "all", roleSide: "survivor", voiceSide: "survivor", filter: "all", search: "", sort: "name", selectedIds: new Set(),
 };
 
 const NAV_ORDER_STORAGE_KEY = "l4d2-mod-manager.nav-order";
@@ -9,7 +9,7 @@ const labels = {
   map: "地图",
   archive: "压缩包",
   spray: "喷漆",
-  survivor_model: "幸存者模型",
+  survivor_model: "生还者模型",
   infected_model: "感染者模型",
   weapon_model: "武器模型",
   prop_model: "环境模型",
@@ -40,6 +40,7 @@ const viewTitles = {
 const rootPath = document.querySelector("#root-path");
 const shell = document.querySelector(".shell");
 const sidebarToggleButton = document.querySelector("#settings-button");
+const settingsNavButton = document.querySelector("#settings-nav");
 const launchGameButton = document.querySelector("#launch-game-button");
 const grid = document.querySelector("#mod-grid");
 const notice = document.querySelector("#notice");
@@ -413,8 +414,22 @@ function effectivePrimaryCategories(mod) {
   return [...new Set([...(mod.primaryCategories || []), ...markedCategories])];
 }
 
+function voiceRoleSide(role) {
+  if (role?.side === "infected" || role?.side === "survivor") return role.side;
+  return ["boomer", "hunter", "smoker", "charger", "jockey", "spitter", "tank", "witch"].includes(role?.id)
+    ? "infected"
+    : "survivor";
+}
+
+function isSimpleInfectedVoice(mod) {
+  const roles = mod.voiceRoles || [];
+  return roles.some((role) => voiceRoleSide(role) === "infected")
+    && !roles.some((role) => voiceRoleSide(role) === "survivor");
+}
+
 function visibleStatusLabel(mod) {
   const isVoiceReplacement = (mod.primaryCategories || []).includes("voice_replacement");
+  if (isSimpleInfectedVoice(mod)) return statusLabels[mod.status] || "检测错误";
   const isAutomaticVoice = isVoiceReplacement
     && (mod.voiceModes || []).includes("automatic")
     && !(mod.voiceModes || []).includes("manual");
@@ -449,10 +464,17 @@ function visibleMods() {
       infected: "infected_model",
       weapon: "weapon_model",
     };
-    const hasPrimaryModelCategory = primaryCategories.includes(modelCategoryBySide[state.roleSide]);
-    const categoryMatch = state.category === "all"
+    const hasConcreteModelTarget = state.roleSide === "weapon"
+      ? (mod.weaponTargets || []).length > 0
+      : (mod.characterTargets || []).some((target) => target.side === state.roleSide);
+    const categoryMatch = state.category === "voice_replacement"
+      ? primaryCategories.includes("voice_replacement")
+        && (mod.voiceRoles || []).some((role) => voiceRoleSide(role) === state.voiceSide)
+      : state.category === "all"
       || primaryCategories.includes(state.category)
-      || (state.category === "survivor_target" && hasPrimaryModelCategory);
+      || (state.category === "survivor_target"
+        && primaryCategories.includes(modelCategoryBySide[state.roleSide])
+        && hasConcreteModelTarget);
     return filterMatch && categoryMatch && (!query || haystack.includes(query));
   });
   return filtered.sort((left, right) => {
@@ -484,6 +506,8 @@ function renderStats() {
 function renderViewTitle() {
   const title = state.category === "survivor_target"
     ? (state.roleSide === "infected" ? "感染者模型" : state.roleSide === "weapon" ? "武器模型" : "生还者模型")
+    : state.category === "voice_replacement"
+    ? (state.voiceSide === "infected" ? "感染者语音替换" : "生还者语音替换")
     : (viewTitles[state.category] || viewTitles.all);
   document.querySelector("#page-title").textContent = title;
   document.querySelector("#spray-manager-button").classList.toggle("hidden", state.category !== "spray");
@@ -507,7 +531,7 @@ function getTagItems(mod) {
   };
 
   (mod.characterTargets || []).forEach((target) => {
-    const side = target.side === "survivor" ? "幸存者" : "感染者";
+    const side = target.side === "survivor" ? "生还者" : "感染者";
     const targetCategory = target.side === "survivor" ? "survivor_model" : "infected_model";
     addTag(
       `character:${target.side}:${target.id}`,
@@ -545,6 +569,7 @@ function setCustomTagMarked(mod, key, marked) {
 
 function renderCard(mod) {
   const isVoiceReplacement = (mod.primaryCategories || []).includes("voice_replacement");
+  const simpleInfectedVoice = isSimpleInfectedVoice(mod);
   const isSpray = (mod.primaryCategories || []).includes("spray");
   const isAutomaticVoice = isVoiceReplacement
     && (mod.voiceModes || []).includes("automatic")
@@ -553,10 +578,12 @@ function renderCard(mod) {
   const disabled = mod.enabled === false && mod.vpkFiles.length > 0;
   const modelConflicts = mod.modelConflicts || [];
   const selected = state.selectedIds.has(mod.id);
-  const status = isVoiceReplacement && !isAutomaticVoice
+  const status = simpleInfectedVoice
+    ? (statusLabels[mod.status] || "检测错误")
+    : isVoiceReplacement && !isAutomaticVoice
     ? (voiceInstalled ? "已替换" : "未替换")
     : (isAutomaticVoice ? (disabled ? "已停用" : "已启用") : (modelConflicts.length ? "模型冲突" : (disabled ? "已停用" : (statusLabels[mod.status] || "检测错误"))));
-  const issue = mod.status !== "matched" || mod.errors.length > 0 || (isVoiceReplacement && !isAutomaticVoice && !voiceInstalled) || modelConflicts.length > 0;
+  const issue = mod.status !== "matched" || mod.errors.length > 0 || (isVoiceReplacement && !isAutomaticVoice && !simpleInfectedVoice && !voiceInstalled) || modelConflicts.length > 0;
   const hiddenTags = mod.hiddenTags || {};
   const tagItems = getTagItems(mod);
   const displayTagItems = state.category === "archive"
@@ -588,13 +615,13 @@ function renderCard(mod) {
   const nekoVpkTargets = mod.nekovpk?.targets || [];
   const hasExperimentalNekoVpkTargets = (mod.nekovpk?.mapping?.targets || []).some((target) => target.ready === true);
   const hasNekoVpkTargets = nekoVpkTargets.length > 1 || hasExperimentalNekoVpkTargets;
-  const voiceActionLabel = isAutomaticVoice ? "查看语音" : (voiceInstalled ? "恢复语音" : "安装语音");
-  const voiceActionIcon = isAutomaticVoice ? "eye" : (voiceInstalled ? "undo-2" : "mic-2");
-  const voiceActionTitle = isAutomaticVoice ? "查看自动加载的语音文件" : (voiceInstalled ? "恢复原始语音" : "安装语音替换");
+  const voiceActionLabel = isAutomaticVoice || simpleInfectedVoice ? "查看语音" : (voiceInstalled ? "恢复语音" : "安装语音");
+  const voiceActionIcon = isAutomaticVoice || simpleInfectedVoice ? "eye" : (voiceInstalled ? "undo-2" : "mic-2");
+  const voiceActionTitle = isAutomaticVoice || simpleInfectedVoice ? "查看自动加载的语音文件" : (voiceInstalled ? "恢复原始语音" : "安装语音替换");
   return `<article class="mod-card ${selected ? "selected" : ""}">
     <div class="preview ${mod.preview ? "" : "missing"}">
       ${preview}
-    <span class="status-chip ${modelConflicts.length ? "model-conflict" : (isVoiceReplacement && !isAutomaticVoice ? (voiceInstalled ? "voice-installed" : "voice-uninstalled") : (disabled ? "disabled" : (issue ? "issue" : "")))}">${escapeHtml(status)}</span>
+    <span class="status-chip ${modelConflicts.length ? "model-conflict" : (isVoiceReplacement && !isAutomaticVoice && !simpleInfectedVoice ? (voiceInstalled ? "voice-installed" : "voice-uninstalled") : (disabled ? "disabled" : (issue ? "issue" : "")))}">${escapeHtml(status)}</span>
     </div>
     <div class="card-body">
       <div class="card-title"><label class="card-select" title="选择 ${escapeHtml(mod.name)}"><input class="card-select-input" type="checkbox" data-mod-id="${escapeHtml(mod.id)}" ${selected ? "checked" : ""} /><span class="sr-only">选择 ${escapeHtml(mod.name)}</span></label><h2 title="${escapeHtml(mod.name)}">${escapeHtml(mod.name)}</h2><button class="more-button" data-action="toggle-tag-menu" data-mod-id="${escapeHtml(mod.id)}" type="button" title="编辑标签" aria-label="编辑 ${escapeHtml(mod.name)} 的标签"><i data-lucide="more-horizontal"></i></button>${tagMenu}</div>
@@ -603,7 +630,7 @@ function renderCard(mod) {
       ${error}
       ${conflictLine}
       <div class="card-actions">
-        ${mod.vpkFiles.length && !isVoiceReplacement ? `<button class="card-action toggle-enabled" data-action="toggle-enabled" data-mod-id="${escapeHtml(mod.id)}" type="button" title="${disabled ? "启用 VPK 文件" : "停用 VPK 文件"}"><i data-lucide="${disabled ? "play" : "pause"}"></i>${disabled ? "启用" : "停用"}</button>` : ""}
+        ${mod.vpkFiles.length && (!isVoiceReplacement || simpleInfectedVoice) ? `<button class="card-action toggle-enabled" data-action="toggle-enabled" data-mod-id="${escapeHtml(mod.id)}" type="button" title="${disabled ? "启用 VPK 文件" : "停用 VPK 文件"}"><i data-lucide="${disabled ? "play" : "pause"}"></i>${disabled ? "启用" : "停用"}</button>` : ""}
         ${hasNekoVpkTargets ? `<button class="card-action" data-action="show-nekovpk" data-mod-id="${escapeHtml(mod.id)}" type="button" title="打开生还者角色替换"><i data-lucide="arrow-right-left"></i>替换角色</button>` : ""}
         ${isVoiceReplacement ? `<button class="card-action" data-action="show-voice" data-mod-id="${escapeHtml(mod.id)}" type="button" title="${voiceActionTitle}"><i data-lucide="${voiceActionIcon}"></i>${voiceActionLabel}</button>` : ""}
         <button class="card-action" data-action="rename" data-mod-id="${escapeHtml(mod.id)}" type="button"><i data-lucide="pencil"></i>重命名</button>
@@ -729,27 +756,39 @@ async function openNekoVpk(mod) {
 function renderVoiceInfo(mod, info) {
   const isAutomaticVoice = (mod.voiceModes || []).includes("automatic")
     && !(mod.voiceModes || []).includes("manual");
+  const simpleInfectedVoice = isSimpleInfectedVoice(mod);
+  const isManualOnly = info.manualOnly === true;
   voiceDialog.dataset.modId = mod.id;
   voiceTitle.textContent = `${mod.name} · 语音替换`;
-  voiceSummary.textContent = isAutomaticVoice
+  voiceSummary.textContent = isManualOnly
+    ? `手动替换语音包 · VPK 内嵌 ${info.sourceArchiveCount || 0} 个压缩包`
+    : isAutomaticVoice
     ? `标准 VPK 语音包 · 启用 VPK 后自动加载 · ${info.sourceFileCount} 个语音文件`
     : info.installed
     ? `已安装 · ${info.sourceFileCount} 个语音文件 · 可恢复原始语音`
     : `检测到 ${info.roles.length} 个角色、${info.sourceFileCount} 个语音文件`;
   const roleRows = (info.roles || []).map((role) => {
-    const directories = isAutomaticVoice
+    const archiveRole = role.sourceType === "archive";
+    const directories = isManualOnly
+      ? `<span class="voice-directory missing">VPK 内嵌压缩包 · 需要按作者教程手动解压</span>`
+      : isAutomaticVoice
       ? `<span class="voice-directory">VPK 内置路径 · 启用后自动加载</span>`
       : (role.targetDirectories || []).map((directory) =>
       `<span class="voice-directory">${escapeHtml(directory.root)} · 覆盖 ${directory.overwrite} / 新增 ${directory.new}</span>`
       ).join("");
-    const missing = isAutomaticVoice ? "" : (role.missingDirectories || []).map((directory) =>
+    const missing = isManualOnly || isAutomaticVoice ? "" : (role.missingDirectories || []).map((directory) =>
       `<span class="voice-directory missing">缺少 ${escapeHtml(directory)}</span>`
     ).join("");
-    const count = isAutomaticVoice
+    const count = isManualOnly
+      ? `<span>仅支持手动安装</span>`
+      : isAutomaticVoice
       ? `<span>${role.sourceFileCount} 个文件</span>`
       : `<span>${role.overwriteCount} 覆盖</span><span>${role.newCount} 新增</span>`;
+    const sourceLabel = archiveRole
+      ? `${(role.archiveFiles || []).length} 个嵌套压缩包`
+      : `${role.sourceFileCount} 个 WAV`;
     return `<div class="voice-role-row">
-      <div class="voice-role-name"><strong>${escapeHtml(role.name)}</strong><span>${role.sourceFileCount} 个 WAV</span></div>
+      <div class="voice-role-name"><strong>${escapeHtml(role.name)}</strong><span>${sourceLabel}</span></div>
       <div class="voice-role-targets">${directories || "<span class=\"voice-directory missing\">没有可安装的游戏目录</span>"}${missing}</div>
       <div class="voice-role-count">${count}</div>
     </div>`;
@@ -761,16 +800,19 @@ function renderVoiceInfo(mod, info) {
   const automaticNote = isAutomaticVoice
     ? `<div class="voice-auto-note">这是标准 VPK 语音包，不需要执行“安装语音”。启用 VPK 后，游戏会直接从这个 VPK 加载语音。</div>`
     : "";
-  voiceBody.innerHTML = `${automaticNote}${conflictText}
+  const manualNote = isManualOnly
+    ? `<div class="voice-auto-note">这个包没有直接放入 WAV，而是把语音放在 VPK 内的压缩包中。管理器不会自动解压或修改游戏文件，请按作者教程手动处理。${(info.sourceFiles || []).map((file) => `<br /><code>${escapeHtml(file)}</code>`).join("")}</div>`
+    : "";
+  voiceBody.innerHTML = `${manualNote}${automaticNote}${conflictText}
     <div class="voice-summary-grid">
       <div><span>覆盖文件</span><strong>${info.roles.reduce((sum, role) => sum + role.overwriteCount, 0)}</strong></div>
       <div><span>新增文件</span><strong>${info.roles.reduce((sum, role) => sum + role.newCount, 0)}</strong></div>
-      <div><span>${isAutomaticVoice ? "加载方式" : "安装目录"}</span><strong>${isAutomaticVoice ? "VPK 自动加载" : info.roles.reduce((sum, role) => sum + role.targetDirectories.length, 0)}</strong></div>
-      <div><span>${isAutomaticVoice ? "手动安装" : "缺失目录"}</span><strong>${isAutomaticVoice ? "不需要" : missingRoots.length}</strong></div>
+      <div><span>${isManualOnly || isAutomaticVoice ? "加载方式" : "安装目录"}</span><strong>${isManualOnly ? "手动解压" : (isAutomaticVoice ? "VPK 自动加载" : info.roles.reduce((sum, role) => sum + role.targetDirectories.length, 0))}</strong></div>
+      <div><span>${isManualOnly ? "内嵌压缩包" : (isAutomaticVoice ? "手动安装" : "缺失目录")}</span><strong>${isManualOnly ? (info.sourceArchiveCount || 0) : (isAutomaticVoice ? "不需要" : missingRoots.length)}</strong></div>
     </div>
-    <div class="voice-role-list">${roleRows || `<div class="vpk-files-empty">没有发现可识别的生还者语音角色</div>`}</div>`;
-  voiceInstall.classList.toggle("hidden", isAutomaticVoice);
-  voiceRestore.classList.toggle("hidden", isAutomaticVoice);
+    <div class="voice-role-list">${roleRows || `<div class="vpk-files-empty">没有发现可识别的语音角色</div>`}</div>`;
+  voiceInstall.classList.toggle("hidden", isAutomaticVoice || isManualOnly || simpleInfectedVoice);
+  voiceRestore.classList.toggle("hidden", isAutomaticVoice || isManualOnly || simpleInfectedVoice);
   voiceInstall.disabled = Boolean(info.installed) || !info.roles.some((role) => role.installable);
   voiceRestore.disabled = !info.installed;
   if (window.lucide) lucide.createIcons();
@@ -1042,6 +1084,7 @@ function render() {
   renderStats();
   renderViewTitle();
   document.querySelector("#role-filters").classList.toggle("hidden", state.category !== "survivor_target");
+  document.querySelector("#voice-role-filters").classList.toggle("hidden", state.category !== "voice_replacement");
   grid.innerHTML = mods.length ? mods.map(renderCard).join("") : `<div class="empty">没有符合条件的 Mod</div>`;
   if (window.lucide) lucide.createIcons();
   document.querySelectorAll(".card-action, .vpk-line, .more-button, .tag-menu-item, .tag-menu-mark, .tag-menu-delete, .tag-menu-restore").forEach((button) => button.addEventListener("click", handleCardAction));
@@ -1062,6 +1105,16 @@ function showNotice(message, success = false) {
   notice.classList.toggle("success", success);
   notice.classList.remove("hidden");
   if (window.lucide) lucide.createIcons();
+}
+
+function reportClientError(context, error) {
+  const message = error instanceof Error ? error.message : String(error || "未知错误");
+  fetch("/api/client-log", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ context: String(context).slice(0, 120), message: message.slice(0, 500) }),
+    keepalive: true,
+  }).catch(() => {});
 }
 
 function setSprayStatus(message, error = false) {
@@ -1606,7 +1659,7 @@ function modelTargetKey(target) {
 }
 
 function modelTargetLabel(target) {
-  const side = target.side === "survivor" ? "幸存者" : target.side === "weapon" ? "武器" : "感染者";
+  const side = target.side === "survivor" ? "生还者" : target.side === "weapon" ? "武器" : "感染者";
   return `${side} · ${target.name}`;
 }
 
@@ -1746,6 +1799,17 @@ async function getThemeConfig() {
   return result;
 }
 
+async function initializeTheme() {
+  // Use the server setting as the source of truth; localStorage is only a fast fallback.
+  applyTheme(normalizeTheme(localStorage.getItem(THEME_STORAGE_KEY)), false);
+  try {
+    const config = await getThemeConfig();
+    applyTheme(config.theme, true);
+  } catch {
+    // Keep the locally cached theme when the backend is temporarily unavailable.
+  }
+}
+
 async function checkForUpdates({ automatic = false } = {}) {
   if (!automatic) {
     updateStatus.textContent = "正在检查更新…";
@@ -1796,6 +1860,7 @@ async function installUpdate() {
 
 async function openSettings() {
   settingsPanel.classList.remove("hidden");
+  settingsNavButton.setAttribute("aria-expanded", "true");
   settingsStatus.textContent = "正在读取配置…";
   try {
     const [config, updateConfig, themeConfig] = await Promise.all([getAiConfig(), getUpdateConfig(), getThemeConfig()]);
@@ -1819,6 +1884,7 @@ async function saveTheme(theme) {
 
 function closeSettings() {
   settingsPanel.classList.add("hidden");
+  settingsNavButton.setAttribute("aria-expanded", "false");
 }
 
 async function saveAiSettings() {
@@ -2136,8 +2202,8 @@ async function loadCatalog(force = false) {
   try {
     const route = force ? `/api/catalog?refresh=${Date.now()}` : "/api/catalog";
     const response = await fetch(route, { cache: "no-store" });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
     state.mods = payload.mods || [];
     catalogLoaded = true;
     sprayAssetsNeedRefresh = true;
@@ -2147,6 +2213,7 @@ async function loadCatalog(force = false) {
     render();
     return state.mods;
   } catch (error) {
+    reportClientError("读取 Mod 目录", error);
     showNotice(`目录读取失败：${error.message}`);
     if (firstLoad) {
       grid.innerHTML = `<div class="empty">资源读取失败，请稍后刷新目录</div>`;
@@ -2208,9 +2275,9 @@ async function resetFolderInner() {
 
 async function findGameFolder() {
   if (operationBusy) return;
-  return runExclusiveOperation("正在查找求生之路 2，请稍候…", async () => {
+  return runExclusiveOperation("正在查找求生之路 2 的 Mod 目录，请稍候…", async () => {
     try {
-      showNotice("正在查找求生之路 2 的 addons 目录…");
+      showNotice("正在查找求生之路 2 的 Mod 目录…");
       const response = await fetch("/api/find-game-folder", { method: "POST" });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
@@ -2395,6 +2462,15 @@ document.querySelectorAll(".role-filter").forEach((button) => button.addEventLis
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.category === "survivor_target"));
   render();
 }));
+document.querySelectorAll(".voice-role-filter").forEach((button) => button.addEventListener("click", () => {
+  if (operationBusy) return;
+  document.querySelectorAll(".voice-role-filter").forEach((item) => item.classList.remove("active"));
+  button.classList.add("active");
+  state.category = "voice_replacement";
+  state.voiceSide = button.dataset.voiceSide;
+  document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.category === "voice_replacement"));
+  render();
+}));
 document.querySelectorAll("[data-bulk-action]").forEach((button) => button.addEventListener("click", () => {
   runBulkAction(button.dataset.bulkAction).catch((error) => showNotice(`批量操作失败：${error.message}`));
 }));
@@ -2419,7 +2495,13 @@ aiPromptSelect.addEventListener("change", () => {
 aiRunButton.addEventListener("click", () => runExclusiveOperation("正在进行 AI 分析，请稍候…", runAiAnalysis));
 aiSavePromptButton.addEventListener("click", () => runExclusiveOperation("正在保存提示词，请稍候…", saveCurrentPrompt));
 aiDeletePromptButton.addEventListener("click", () => runExclusiveOperation("正在删除提示词，请稍候…", deleteCurrentPrompt));
-document.querySelector("#settings-nav").addEventListener("click", openSettings);
+settingsNavButton.addEventListener("click", () => {
+  if (settingsPanel.classList.contains("hidden")) {
+    openSettings();
+  } else {
+    closeSettings();
+  }
+});
 sidebarToggleButton.addEventListener("click", toggleSidebar);
 document.querySelector("#settings-close").addEventListener("click", closeSettings);
 themeSelect.addEventListener("change", () => {
@@ -2628,11 +2710,11 @@ document.addEventListener("keydown", (event) => {
 });
 
 restoreSidebarState();
-applyTheme(normalizeTheme(localStorage.getItem(THEME_STORAGE_KEY)), false);
 const initialNavOrder = restoreNavOrder();
 restoreNavOrderFromServer(initialNavOrder);
 initializeNavDragging();
 if (window.lucide) lucide.createIcons();
+initializeTheme();
 loadCatalog();
 getUpdateConfig().then((config) => {
   if (config.autoCheck) checkForUpdates({ automatic: true });
@@ -2641,3 +2723,10 @@ getUpdateConfig().then((config) => {
 });
 checkForSourceChanges();
 window.setInterval(checkForSourceChanges, 1000);
+
+window.addEventListener("error", (event) => {
+  reportClientError(`前端脚本 ${event.filename || "未知文件"}:${event.lineno || 0}`, event.error || event.message);
+});
+window.addEventListener("unhandledrejection", (event) => {
+  reportClientError("前端异步任务", event.reason);
+});
