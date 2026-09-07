@@ -17,6 +17,7 @@
           </div>
         </div>
 
+
         <nav class="nav" aria-label="主导航">
           <button class="nav-item nav-pinned active" data-nav-id="library" data-category="all" draggable="false" type="button"><i data-lucide="layout-grid"></i>Mod 库</button>
           <button class="nav-item" data-nav-id="map" data-category="map" draggable="true" type="button"><i data-lucide="map"></i>地图</button>
@@ -27,6 +28,7 @@
           <button id="settings-nav" class="nav-item" data-nav-id="settings" draggable="true" type="button"><i data-lucide="settings-2"></i>设置</button>
         </nav>
 
+
         <div class="sidebar-footer">
           <div class="folder-label"><i data-lucide="folder-open"></i>当前目录</div>
           <div id="root-path" class="root-path">正在读取...</div>
@@ -35,6 +37,7 @@
           <button id="refresh-button" class="outline-button" type="button"><i data-lucide="refresh-cw"></i>刷新目录</button>
         </div>
       </aside>
+
 
       <section class="content">
         <header class="topbar">
@@ -56,11 +59,13 @@
           </div>
         </header>
 
+
         <section class="stats" aria-label="库统计">
           <div class="stat"><span id="total-label">全部 Mod</span><strong id="total-count">--</strong></div>
           <div class="stat"><span>已配对预览</span><strong id="matched-count">--</strong></div>
           <div class="stat warning"><span>需要整理</span><strong id="issue-count">--</strong></div>
         </section>
+
 
         <div class="toolbar">
           <div class="toolbar-filters">
@@ -93,6 +98,7 @@
             </select>
           </label>
         </div>
+
 
         <div id="notice" class="notice hidden"></div>
         <section id="mod-grid" class="mod-grid" aria-live="polite"></section>
@@ -301,6 +307,11 @@
             <input id="update-auto-check" type="checkbox" checked />
             <span>启动时自动检查更新</span>
           </label>
+          <label class="settings-label" for="update-source-select">更新源</label>
+          <select id="update-source-select" class="settings-input">
+            <option value="github">GitHub</option>
+            <option value="gitee">Gitee</option>
+          </select>
           <div class="settings-version">当前版本：<strong id="update-current-version">读取中…</strong></div>
           <div class="settings-actions settings-update-actions">
             <button id="update-check-button" class="outline-button" type="button"><i data-lucide="refresh-cw"></i>检查更新</button>
