@@ -24,7 +24,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 from ctypes import wintypes
 
-from app_version import APP_VERSION, UPDATE_REPOSITORY
+from app_version import APP_VERSION, GITEE_REPOSITORY, UPDATE_REPOSITORY
 from app_logging import close_logging, log_path, write_log
 
 from folder_picker import choose_folder
@@ -87,6 +87,7 @@ SETTINGS_KEY_DEEPSEEK_API_KEY = "deepseekApiKey"
 SETTINGS_KEY_DEEPSEEK_MODEL = "deepseekModel"
 SETTINGS_KEY_AI_PROMPTS = "aiPrompts"
 SETTINGS_KEY_AUTO_UPDATE_CHECK = "autoUpdateCheck"
+SETTINGS_KEY_UPDATE_SOURCE = "updateSource"
 SETTINGS_KEY_NAV_ORDER = "navOrder"
 SETTINGS_KEY_THEME = "theme"
 THEMES = {"dark", "light"}
@@ -94,6 +95,19 @@ DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_MODELS = {"deepseek-chat", "deepseek-reasoner"}
 GITHUB_RELEASE_API_URL = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
+GITEE_RELEASE_API_URL = f"https://gitee.com/api/v5/repos/{GITEE_REPOSITORY}/releases/latest"
+UPDATE_SOURCES = {
+    "github": {
+        "label": "GitHub",
+        "apiUrl": GITHUB_RELEASE_API_URL,
+        "allowedHosts": {"github.com"},
+    },
+    "gitee": {
+        "label": "Gitee",
+        "apiUrl": GITEE_RELEASE_API_URL,
+        "allowedHosts": {"gitee.com"},
+    },
+}
 UPDATE_MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
 UPDATE_ASSET_EXTENSIONS = {".exe", ".zip"}
 GAME_EXECUTABLE_NAME = "left4dead2.exe"
@@ -115,18 +129,26 @@ def _version_key(value: str) -> tuple[int, int, int]:
     match = re.fullmatch(r"v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+].*)?", str(value).strip(), re.IGNORECASE)
     if not match:
         raise UpdateError(f"GitHub 返回了无法识别的版本号：{value}")
-    return tuple(int(part or 0) for part in match.groups())
+    major = int(match.group(1))
+    minor = int(match.group(2) or 0)
+    patch = int(match.group(3) or 0)
+    # Historical releases use v0.31/v0.32 as patch-style versions.
+    if major == 0 and match.group(2) and match.group(3) is None and minor >= 10:
+        return major, minor // 10, minor % 10
+    return major, minor, patch
 
 
-def _select_update_asset(assets: object) -> dict:
+def _select_update_asset(assets: object, allowed_hosts: set[str] | None = None) -> dict:
     if not isinstance(assets, list):
         assets = []
+    allowed_hosts = allowed_hosts or {"github.com"}
     candidates = [
         item
         for item in assets
         if isinstance(item, dict)
         and Path(str(item.get("name", ""))).suffix.casefold() in UPDATE_ASSET_EXTENSIONS
-        and str(item.get("browser_download_url", "")).startswith("https://github.com/")
+        and urlsplit(str(item.get("browser_download_url", ""))).scheme == "https"
+        and urlsplit(str(item.get("browser_download_url", ""))).hostname in allowed_hosts
     ]
     executable_assets = [
         item for item in candidates if Path(str(item.get("name", ""))).suffix.casefold() == ".exe"
@@ -160,11 +182,30 @@ def _select_update_asset(assets: object) -> dict:
     raise UpdateError("最新 Release 包含多个无法区分的 ZIP 更新文件")
 
 
-def _latest_release() -> dict:
+def update_source() -> str:
+    value = _read_settings().get(SETTINGS_KEY_UPDATE_SOURCE, "github")
+    return value if isinstance(value, str) and value in UPDATE_SOURCES else "github"
+
+
+def save_update_source(source: str) -> None:
+    if not isinstance(source, str) or source not in UPDATE_SOURCES:
+        raise ValueError("更新源设置无效")
+    target = settings_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    settings = _read_settings()
+    settings[SETTINGS_KEY_UPDATE_SOURCE] = source
+    target.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _latest_release(source: str | None = None) -> dict:
+    source = update_source() if source is None else source
+    source_info = UPDATE_SOURCES.get(source)
+    if source_info is None:
+        raise UpdateError("更新源设置无效")
     request = urllib.request.Request(
-        GITHUB_RELEASE_API_URL,
+        source_info["apiUrl"],
         headers={
-            "Accept": "application/vnd.github+json",
+            "Accept": "application/json",
             "User-Agent": "Tudou-Mod-Manager",
         },
     )
@@ -172,14 +213,22 @@ def _latest_release() -> dict:
         with urllib.request.urlopen(request, timeout=12) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
-        raise UpdateError(f"无法读取 GitHub 最新版本：{error}") from error
+        raise UpdateError(f"无法读取 {source_info['label']} 最新版本：{error}") from error
     if not isinstance(payload, dict):
-        raise UpdateError("GitHub 返回的版本信息无效")
+        raise UpdateError(f"{source_info['label']} 返回的版本信息无效")
 
     tag = str(payload.get("tag_name", "")).strip()
     if not tag:
-        raise UpdateError("GitHub Release 缺少版本号")
-    asset = _select_update_asset(payload.get("assets"))
+        raise UpdateError(f"{source_info['label']} Release 缺少版本号")
+    raw_assets = payload.get("assets")
+    assets = []
+    for item in raw_assets if isinstance(raw_assets, list) else []:
+        if not isinstance(item, dict):
+            continue
+        normalized = dict(item)
+        normalized.setdefault("browser_download_url", normalized.get("download_url") or normalized.get("url", ""))
+        assets.append(normalized)
+    asset = _select_update_asset(assets, source_info["allowedHosts"])
     try:
         version = _version_key(tag)
     except UpdateError:
@@ -190,6 +239,8 @@ def _latest_release() -> dict:
     return {
         "version": tag.removeprefix("v"),
         "versionKey": version,
+        "updateSource": source,
+        "updateSourceLabel": source_info["label"],
         "name": str(payload.get("name", "")).strip() or tag,
         "releaseUrl": str(payload.get("html_url", "")).strip(),
         "publishedAt": str(payload.get("published_at", "")).strip(),
@@ -203,7 +254,7 @@ def _latest_release() -> dict:
 
 
 def update_info() -> dict:
-    release = _latest_release()
+    release = _latest_release(update_source())
     return {
         "currentVersion": APP_VERSION,
         "latestVersion": release["version"],
@@ -214,6 +265,8 @@ def update_info() -> dict:
         "notes": release["notes"],
         "assetName": release["assetName"],
         "assetSize": release["assetSize"],
+        "updateSource": release.get("updateSource", update_source()),
+        "updateSourceLabel": release.get("updateSourceLabel", UPDATE_SOURCES[update_source()]["label"]),
     }
 
 
@@ -250,7 +303,13 @@ def theme_config() -> dict:
 
 
 def update_config() -> dict:
-    return {"currentVersion": APP_VERSION, "autoCheck": auto_update_check_enabled()}
+    source = update_source()
+    return {
+        "currentVersion": APP_VERSION,
+        "autoCheck": auto_update_check_enabled(),
+        "updateSource": source,
+        "sources": [{"id": key, "label": value["label"]} for key, value in UPDATE_SOURCES.items()],
+    }
 
 
 def navigation_order() -> list[str]:
@@ -1715,9 +1774,15 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
             if route == "/api/update/config":
                 payload = self._read_json()
                 enabled = payload.get("autoCheck")
-                if not isinstance(enabled, bool):
-                    raise ValueError("自动检查更新设置无效")
-                save_auto_update_check(enabled)
+                source = payload.get("updateSource")
+                if enabled is None and source is None:
+                    raise ValueError("更新设置无效")
+                if enabled is not None:
+                    if not isinstance(enabled, bool):
+                        raise ValueError("自动检查更新设置无效")
+                    save_auto_update_check(enabled)
+                if source is not None:
+                    save_update_source(str(source).strip().casefold())
                 self._send_json(200, update_config())
                 return
 

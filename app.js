@@ -66,6 +66,7 @@ const settingsStatus = document.querySelector("#settings-status");
 const themeSelect = document.querySelector("#theme-select");
 const themeStatus = document.querySelector("#theme-status");
 const updateAutoCheck = document.querySelector("#update-auto-check");
+const updateSourceSelect = document.querySelector("#update-source-select");
 const updateCurrentVersion = document.querySelector("#update-current-version");
 const updateCheckButton = document.querySelector("#update-check-button");
 const updateInstallButton = document.querySelector("#update-install-button");
@@ -1840,6 +1841,13 @@ async function saveUpdateCheckSetting(enabled) {
   updateStatus.textContent = result.autoCheck ? "已开启启动时自动检查" : "已关闭启动时自动检查";
 }
 
+async function saveUpdateSource(source) {
+  const result = await postJson("/api/update/config", { updateSource: source });
+  updateSourceSelect.value = result.updateSource || "github";
+  const label = result.sources?.find((item) => item.id === result.updateSource)?.label || result.updateSource;
+  updateStatus.textContent = `已切换更新源：${label}`;
+}
+
 async function installUpdate() {
   if (!latestUpdateInfo || !latestUpdateInfo.updateAvailable) {
     await checkForUpdates();
@@ -1868,6 +1876,8 @@ async function openSettings() {
     deepseekKeyInput.value = "";
     settingsStatus.textContent = config.configured ? "API Key 已配置" : "尚未配置 API Key";
     updateAutoCheck.checked = updateConfig.autoCheck !== false;
+    updateSourceSelect.value = updateConfig.updateSource || "github";
+    updateSourceSelect.dataset.currentValue = updateSourceSelect.value;
     updateCurrentVersion.textContent = `v${updateConfig.currentVersion}`;
     const theme = applyTheme(themeConfig.theme, true);
     themeStatus.textContent = theme === "light" ? "已使用白色主题" : "已使用黑色主题";
@@ -2527,6 +2537,20 @@ updateAutoCheck.addEventListener("change", () => {
       await saveUpdateCheckSetting(enabled);
     } catch (error) {
       updateAutoCheck.checked = !enabled;
+      updateStatus.textContent = `保存失败：${error.message}`;
+    }
+  });
+});
+updateSourceSelect.addEventListener("change", () => {
+  if (operationBusy) return;
+  const previous = updateSourceSelect.dataset.currentValue || "github";
+  const next = updateSourceSelect.value;
+  runExclusiveOperation("正在保存更新源，请稍候…", async () => {
+    try {
+      await saveUpdateSource(next);
+      updateSourceSelect.dataset.currentValue = next;
+    } catch (error) {
+      updateSourceSelect.value = previous;
       updateStatus.textContent = `保存失败：${error.message}`;
     }
   });

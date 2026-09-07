@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 import zipfile
@@ -7,7 +8,11 @@ from unittest.mock import patch
 from mod_server import (
     UpdateError,
     _find_update_executable,
+    _latest_release,
     _select_update_asset,
+    save_update_source,
+    update_config,
+    update_source,
     _validate_direct_executable,
     _version_key,
     update_info,
@@ -19,6 +24,7 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(_version_key("v0.2"), (0, 2, 0))
         self.assertLess(_version_key("0.2"), _version_key("v0.2.1"))
         self.assertLess(_version_key("v0.9"), _version_key("v1.0"))
+        self.assertLess(_version_key("v0.32"), _version_key("v0.4"))
 
     def test_update_info_marks_newer_release(self):
         release = {
@@ -42,6 +48,41 @@ class UpdateTests(unittest.TestCase):
             {"name": "source.zip", "browser_download_url": "https://github.com/example/source.zip"},
         ]
         self.assertEqual(_select_update_asset(assets)["name"], "TudouManager-v0.31.exe")
+
+    def test_update_asset_accepts_gitee_download_url(self):
+        assets = [{"name": "TudouManager-v0.4.exe", "browser_download_url": "https://gitee.com/example/release/download/v0.4/TudouManager-v0.4.exe"}]
+        self.assertEqual(_select_update_asset(assets, {"gitee.com"})["name"], "TudouManager-v0.4.exe")
+
+    def test_latest_release_normalizes_gitee_download_url(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "tag_name": "v0.4",
+                    "name": "土豆管理器 v0.4",
+                    "assets": [{
+                        "name": "TudouManager-v0.4.exe",
+                        "download_url": "https://gitee.com/veliona1018/tudou-mod-manager/releases/download/v0.4/TudouManager-v0.4.exe",
+                        "size": 123,
+                    }],
+                }).encode("utf-8")
+
+        with patch("mod_server.urllib.request.urlopen", return_value=FakeResponse()):
+            release = _latest_release("gitee")
+        self.assertEqual(release["updateSource"], "gitee")
+        self.assertEqual(release["assetUrl"].split("://", 1)[0], "https")
+
+    def test_update_source_is_saved_and_exposed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.dict("os.environ", {"LOCALAPPDATA": temporary}, clear=False):
+                save_update_source("gitee")
+                self.assertEqual(update_source(), "gitee")
+                self.assertEqual(update_config()["updateSource"], "gitee")
 
     def test_update_asset_falls_back_to_zip(self):
         assets = [{"name": "TudouManager-v0.31.zip", "browser_download_url": "https://github.com/example/update.zip"}]
