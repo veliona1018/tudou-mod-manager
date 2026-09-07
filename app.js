@@ -2,7 +2,9 @@ const state = {
   mods: [], category: "all", roleSide: "survivor", filter: "all", search: "", sort: "name", selectedIds: new Set(),
 };
 
+
 const NAV_ORDER_STORAGE_KEY = "l4d2-mod-manager.nav-order";
+
 
 const labels = {
   map: "地图",
@@ -21,11 +23,13 @@ const labels = {
   script: "脚本/功能",
 };
 
+
 const statusLabels = {
   matched: "已配对",
   missing_preview: "缺少预览图",
   image_without_vpk: "缺少 VPK",
 };
+
 
 const viewTitles = {
   all: "我的 Mod",
@@ -35,6 +39,7 @@ const viewTitles = {
   voice_replacement: "语音替换 Mod",
   spray: "喷漆 Mod",
 };
+
 
 const rootPath = document.querySelector("#root-path");
 const shell = document.querySelector(".shell");
@@ -61,6 +66,7 @@ const aiModelSelect = document.querySelector("#ai-model-select");
 const deepseekKeyInput = document.querySelector("#deepseek-key-input");
 const settingsStatus = document.querySelector("#settings-status");
 const updateAutoCheck = document.querySelector("#update-auto-check");
+const updateSourceSelect = document.querySelector("#update-source-select");
 const updateCurrentVersion = document.querySelector("#update-current-version");
 const updateCheckButton = document.querySelector("#update-check-button");
 const updateInstallButton = document.querySelector("#update-install-button");
@@ -145,6 +151,7 @@ let sprayAssetsNeedRefresh = true;
 const standardSpraySlots = Array.from({ length: 16 }, (_, index) => String(index + 1));
 const SIDEBAR_STATE_STORAGE_KEY = "l4d2-mod-manager.sidebar-collapsed";
 
+
 function setSidebarCollapsed(collapsed, persist = true) {
   shell.classList.toggle("sidebar-collapsed", collapsed);
   sidebarToggleButton.setAttribute("aria-pressed", String(collapsed));
@@ -153,14 +160,17 @@ function setSidebarCollapsed(collapsed, persist = true) {
   if (persist) localStorage.setItem(SIDEBAR_STATE_STORAGE_KEY, String(collapsed));
 }
 
+
 function toggleSidebar() {
   closeSettings();
   setSidebarCollapsed(!shell.classList.contains("sidebar-collapsed"));
 }
 
+
 function restoreSidebarState() {
   setSidebarCollapsed(localStorage.getItem(SIDEBAR_STATE_STORAGE_KEY) === "true", false);
 }
+
 
 function normalizeNavOrder(value) {
   if (!Array.isArray(value)) return [];
@@ -168,6 +178,7 @@ function normalizeNavOrder(value) {
     .filter((id) => typeof id === "string")
     .map((id) => id === "ai-settings" ? "settings" : id))];
 }
+
 
 function applyNavOrder(savedOrder) {
   const nav = document.querySelector(".nav");
@@ -185,6 +196,7 @@ function applyNavOrder(savedOrder) {
   });
 }
 
+
 function readLocalNavOrder() {
   try {
     return normalizeNavOrder(JSON.parse(localStorage.getItem(NAV_ORDER_STORAGE_KEY) || "[]"));
@@ -193,11 +205,13 @@ function readLocalNavOrder() {
   }
 }
 
+
 function restoreNavOrder() {
   const savedOrder = readLocalNavOrder();
   applyNavOrder(savedOrder);
   return savedOrder;
 }
+
 
 async function restoreNavOrderFromServer(localOrder) {
   try {
@@ -216,6 +230,7 @@ async function restoreNavOrderFromServer(localOrder) {
   }
 }
 
+
 async function persistNavOrder(order) {
   try {
     await fetch("/api/navigation/order", {
@@ -227,6 +242,7 @@ async function persistNavOrder(order) {
     // Keep the browser cache as a fallback for the current session.
   }
 }
+
 
 function saveNavOrder() {
   const nav = document.querySelector(".nav");
@@ -240,6 +256,7 @@ function saveNavOrder() {
   persistNavOrder(order);
 }
 
+
 function initializeNavDragging() {
   const nav = document.querySelector(".nav");
   if (!nav) return;
@@ -251,6 +268,7 @@ function initializeNavDragging() {
   let dragStarted = false;
   let suppressClickUntil = 0;
 
+
   const clearPressTimer = () => {
     if (pressTimer !== null) {
       window.clearTimeout(pressTimer);
@@ -258,9 +276,11 @@ function initializeNavDragging() {
     }
   };
 
+
   const clearDropTargets = () => {
     nav.querySelectorAll(".drop-target").forEach((item) => item.classList.remove("drop-target"));
   };
+
 
   const finishDrag = (event, cancelled = false) => {
     clearPressTimer();
@@ -283,6 +303,7 @@ function initializeNavDragging() {
     pressStart = null;
     dragStarted = false;
   };
+
 
   const handlePointerMove = (event) => {
     if (pointerId !== event.pointerId || !pressedItem || !pressStart) return;
@@ -308,6 +329,7 @@ function initializeNavDragging() {
     const bounds = target.getBoundingClientRect();
     nav.insertBefore(draggedItem, event.clientY < bounds.top + bounds.height / 2 ? target : target.nextSibling);
   };
+
 
   nav.querySelectorAll(".nav-item").forEach((item) => {
     if (item.classList.contains("nav-pinned")) return;
@@ -346,6 +368,7 @@ function initializeNavDragging() {
   window.addEventListener("blur", () => finishDrag(null, true));
 }
 
+
 function runExclusiveOperation(message, task) {
   if (operationBusy) return Promise.resolve(false);
   operationBusy = true;
@@ -360,6 +383,7 @@ function runExclusiveOperation(message, task) {
       document.body.removeAttribute("aria-busy");
     });
 }
+
 
 async function checkForSourceChanges() {
   try {
@@ -377,15 +401,18 @@ async function checkForSourceChanges() {
   }
 }
 
+
 function fileUrl(filePath) {
   return "/files/" + filePath.split("/").map(encodeURIComponent).join("/");
 }
+
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>'"]/g, (character) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
   }[character]));
 }
+
 
 function effectivePrimaryCategories(mod) {
   const categoryByLabel = new Map(Object.entries(labels).map(([category, label]) => [label, category]));
@@ -395,6 +422,7 @@ function effectivePrimaryCategories(mod) {
     .filter((category) => Object.prototype.hasOwnProperty.call(labels, category));
   return [...new Set([...(mod.primaryCategories || []), ...markedCategories])];
 }
+
 
 function visibleStatusLabel(mod) {
   const isVoiceReplacement = (mod.primaryCategories || []).includes("voice_replacement");
@@ -407,6 +435,7 @@ function visibleStatusLabel(mod) {
   if (mod.enabled === false && mod.vpkFiles?.length) return "已停用";
   return statusLabels[mod.status] || "检测错误";
 }
+
 
 function visibleMods() {
   const query = state.search.trim().toLowerCase();
@@ -451,6 +480,7 @@ function visibleMods() {
   });
 }
 
+
 function renderStats() {
   const mods = visibleMods();
   const isFiltered = state.category !== "all"
@@ -464,6 +494,7 @@ function renderStats() {
   )).length;
 }
 
+
 function renderViewTitle() {
   const title = state.category === "survivor_target"
     ? (state.roleSide === "infected" ? "感染者模型" : state.roleSide === "weapon" ? "武器模型" : "生还者模型")
@@ -472,12 +503,14 @@ function renderViewTitle() {
   document.querySelector("#spray-manager-button").classList.toggle("hidden", state.category !== "spray");
 }
 
+
 function renderSelectionActions() {
   const availableIds = new Set(state.mods.map((mod) => mod.id));
   state.selectedIds = new Set([...state.selectedIds].filter((id) => availableIds.has(id)));
   selectionCount.textContent = state.selectedIds.size;
   selectionActions.classList.toggle("hidden", state.selectedIds.size === 0);
 }
+
 
 function getTagItems(mod) {
   const primaryCategories = mod.primaryCategories || [];
@@ -488,6 +521,7 @@ function getTagItems(mod) {
     if (Object.prototype.hasOwnProperty.call(hiddenTags, key)) return;
     items.push({ key, label: tagOverrides[key] || label, primary, custom: key.startsWith("custom:") });
   };
+
 
   (mod.characterTargets || []).forEach((target) => {
     const side = target.side === "survivor" ? "幸存者" : "感染者";
@@ -519,12 +553,14 @@ function getTagItems(mod) {
   return items;
 }
 
+
 function setCustomTagMarked(mod, key, marked) {
   const id = key.replace(/^custom:/, "");
   mod.customTags = (mod.customTags || []).map((tag) => (
     tag.id === id ? { ...tag, marked } : tag
   ));
 }
+
 
 function renderCard(mod) {
   const isVoiceReplacement = (mod.primaryCategories || []).includes("voice_replacement");
@@ -596,6 +632,7 @@ function renderCard(mod) {
   </article>`;
 }
 
+
 function formatFileSize(bytes) {
   if (!Number.isFinite(bytes)) return "";
   if (bytes < 1024) return `${bytes} B`;
@@ -603,6 +640,7 @@ function formatFileSize(bytes) {
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
+
 
 function renderVpkFiles(mod, details = []) {
   const files = mod.vpkFiles || [];
@@ -631,6 +669,7 @@ function renderVpkFiles(mod, details = []) {
   if (window.lucide) lucide.createIcons();
 }
 
+
 async function loadVpkFileDetails(mod) {
   const response = await fetch(`/api/mod/file-details?id=${encodeURIComponent(mod.id)}`, { cache: "no-store" });
   const result = await response.json();
@@ -640,6 +679,7 @@ async function loadVpkFileDetails(mod) {
     vpkFilesSummary.textContent = `共 ${result.files.length} 个文件，已检查内容是否重复`;
   }
 }
+
 
 function openVpkFiles(mod) {
   vpkFilesDialog.dataset.modId = mod.id;
@@ -651,6 +691,7 @@ function openVpkFiles(mod) {
     vpkFilesSummary.textContent = `共 ${mod.vpkFiles.length} 个文件，重复检测失败：${error.message}`;
   });
 }
+
 
 function renderNekoVpkTargets(mod, info) {
   const targets = info.targets || [];
@@ -691,6 +732,7 @@ function renderNekoVpkTargets(mod, info) {
   if (window.lucide) lucide.createIcons();
 }
 
+
 async function openNekoVpk(mod) {
   nekoVpkDialog.dataset.modId = mod.id;
   nekoVpkTitle.textContent = `${mod.name} · 替换角色`;
@@ -708,6 +750,7 @@ async function openNekoVpk(mod) {
     nekoVpkTargetList.innerHTML = `<div class="vpk-files-empty">无法读取角色资源</div>`;
   }
 }
+
 
 function renderVoiceInfo(mod, info) {
   const isAutomaticVoice = (mod.voiceModes || []).includes("automatic")
@@ -759,6 +802,7 @@ function renderVoiceInfo(mod, info) {
   if (window.lucide) lucide.createIcons();
 }
 
+
 async function openVoiceReplacement(mod) {
   voiceDialog.dataset.modId = mod.id;
   voiceTitle.textContent = `${mod.name} · 语音替换`;
@@ -781,6 +825,7 @@ async function openVoiceReplacement(mod) {
   }
 }
 
+
 function setVoiceLoading(loading, message = "正在处理语音包，请稍候…") {
   voiceLoadingMessage.textContent = message;
   voiceLoading.classList.toggle("hidden", !loading);
@@ -788,6 +833,7 @@ function setVoiceLoading(loading, message = "正在处理语音包，请稍候�
   voiceInstall.disabled = loading;
   voiceRestore.disabled = loading;
 }
+
 
 async function installVoiceReplacement(mod) {
   const install = async (replaceExisting) => postJson("/api/mod/voice/install", {
@@ -804,6 +850,7 @@ async function installVoiceReplacement(mod) {
     return install(true);
   }
 }
+
 
 async function handleVoiceAction(action) {
   if (operationBusy) return;
@@ -832,6 +879,7 @@ async function handleVoiceAction(action) {
     }
   });
 }
+
 
 async function handleNekoVpkTargetAction(event) {
   if (operationBusy) return;
@@ -875,11 +923,13 @@ async function handleNekoVpkTargetAction(event) {
   });
 }
 
+
 async function handleVpkFileAction(event) {
   if (operationBusy) return;
   const target = event.target;
   return runExclusiveOperation("正在处理 VPK 文件，请稍候…", () => handleVpkFileActionInner(target));
 }
+
 
 async function handleVpkFileActionInner(target) {
   const button = target.closest("button[data-action='delete-vpk-file']");
@@ -906,6 +956,7 @@ async function handleVpkFileActionInner(target) {
     button.disabled = false;
   }
 }
+
 
 function importPreviewItem(mod) {
   const tags = getTagItems(mod);
@@ -935,15 +986,18 @@ function importPreviewItem(mod) {
   </article>`;
 }
 
+
 function renderImportPreview() {
   importPreviewList.innerHTML = activeImportMods.map(importPreviewItem).join("");
   if (window.lucide) lucide.createIcons();
 }
 
+
 function setImportPreviewStatus(message, error = false) {
   importPreviewStatus.textContent = message;
   importPreviewStatus.classList.toggle("error", error);
 }
+
 
 function openImportPreview(mods) {
   activeImportMods = mods;
@@ -958,11 +1012,13 @@ function openImportPreview(mods) {
   return closed;
 }
 
+
 async function handleImportPreviewAction(event) {
   if (operationBusy) return;
   const target = event.target;
   return runExclusiveOperation("正在保存标签，请稍候…", () => handleImportPreviewActionInner(target));
 }
+
 
 async function handleImportPreviewActionInner(target) {
   const button = target.closest("button[data-import-action]");
@@ -1020,6 +1076,7 @@ async function handleImportPreviewActionInner(target) {
   }
 }
 
+
 function render() {
   const mods = visibleMods();
   renderStats();
@@ -1032,6 +1089,7 @@ function render() {
   renderSelectionActions();
 }
 
+
 function handleSelectionChange(event) {
   if (operationBusy) return;
   const id = event.currentTarget.dataset.modId;
@@ -1040,6 +1098,7 @@ function handleSelectionChange(event) {
   render();
 }
 
+
 function showNotice(message, success = false) {
   notice.innerHTML = `<span class="notice-message">${escapeHtml(message)}</span><button class="notice-close" type="button" title="关闭提示" aria-label="关闭提示"><i data-lucide="x"></i></button>`;
   notice.classList.toggle("success", success);
@@ -1047,10 +1106,12 @@ function showNotice(message, success = false) {
   if (window.lucide) lucide.createIcons();
 }
 
+
 function setSprayStatus(message, error = false) {
   sprayStatus.textContent = message;
   sprayStatus.classList.toggle("error", error);
 }
+
 
 function setSprayLoading(loading, message = "正在处理喷漆，请稍候…") {
   sprayLoading.classList.toggle("hidden", !loading);
@@ -1059,6 +1120,7 @@ function setSprayLoading(loading, message = "正在处理喷漆，请稍候…")
   sprayImportButton.disabled = loading;
   sprayApply.disabled = loading;
 }
+
 
 function renderSpraySlotUsage() {
   const usedSlots = new Set(Object.keys(sprayAssignments).filter((slot) => standardSpraySlots.includes(slot)));
@@ -1072,13 +1134,16 @@ function renderSpraySlotUsage() {
   }).join("");
 }
 
+
 function visibleSprayAssets() {
   return sprayAssets.filter((asset) => (spraySourceTab === "imported" ? asset.sourceType === "imported" : asset.sourceType !== "imported"));
 }
 
+
 function sprayConfigModeLabel(mode) {
   return { static: "静态", dynamic: "动态", gradient: "渐变" }[mode] || "未配置";
 }
+
 
 const sprayGradientLevels = [
   { label: "近距离", size: 512 },
@@ -1088,9 +1153,11 @@ const sprayGradientLevels = [
   { label: "远距离", size: 32 },
 ];
 
+
 function defaultSprayGradientMipmaps(assetId) {
   return sprayGradientLevels.map(({ size }) => ({ size, assetId, frame: 0 }));
 }
+
 
 function normalizedSprayGradientMipmaps(configuration, fallbackAssetId) {
   const raw = Array.isArray(configuration?.mipmaps) && configuration.mipmaps.length
@@ -1108,13 +1175,16 @@ function normalizedSprayGradientMipmaps(configuration, fallbackAssetId) {
   });
 }
 
+
 function defaultSprayConfig(asset) {
   return { mode: "static", frame: 0, source: "images", frames: [{ assetId: asset.id, frame: 0, durationMs: 100 }], mipmaps: defaultSprayGradientMipmaps(asset.id) };
 }
 
+
 function importedSprayAssets() {
   return sprayAssets.filter((asset) => asset.sourceType === "imported");
 }
+
 
 function sprayPreviewUrl(assetId, frame = null) {
   const asset = sprayAssets.find((item) => item.id === assetId);
@@ -1122,12 +1192,14 @@ function sprayPreviewUrl(assetId, frame = null) {
   return frame === null ? asset.preview : `${asset.preview}&frame=${encodeURIComponent(frame)}`;
 }
 
+
 function stopSprayConfigPreview() {
   if (sprayConfigPreviewTimer !== null) {
     window.clearTimeout(sprayConfigPreviewTimer);
     sprayConfigPreviewTimer = null;
   }
 }
+
 
 function renderSprayConfigPreview() {
   const stage = sprayConfigBody.querySelector("#spray-config-preview-stage");
@@ -1204,6 +1276,7 @@ function renderSprayConfigPreview() {
     : `动态 · ${assets.length} 张图片 · 按各自时长播放`;
 }
 
+
 function renderSprayConfigEditor() {
   if (!sprayConfigAsset || !sprayConfigDraft) return;
   const mode = sprayConfigDraft.mode || "static";
@@ -1267,6 +1340,7 @@ function renderSprayConfigEditor() {
   if (window.lucide) lucide.createIcons();
 }
 
+
 function collectSprayConfig() {
   const mode = sprayConfigBody.querySelector("[data-config-mode].active")?.dataset.configMode || "static";
   if (mode === "static") {
@@ -1297,6 +1371,7 @@ function collectSprayConfig() {
   };
 }
 
+
 function openSprayConfig(assetId) {
   if (operationBusy) return;
   const asset = sprayAssets.find((item) => item.id === assetId && item.sourceType === "imported");
@@ -1307,6 +1382,7 @@ function openSprayConfig(assetId) {
   if (typeof sprayConfigDialog.showModal === "function") sprayConfigDialog.showModal();
   else sprayConfigDialog.setAttribute("open", "");
 }
+
 
 async function saveSprayConfig() {
   if (!sprayConfigAsset || operationBusy) return;
@@ -1328,6 +1404,7 @@ async function saveSprayConfig() {
     }
   });
 }
+
 
 function renderSprayAssets() {
   const options = [
@@ -1355,6 +1432,7 @@ function renderSprayAssets() {
   if (window.lucide) lucide.createIcons();
 }
 
+
 function setSpraySourceTab(source) {
   spraySourceTab = source === "imported" ? "imported" : "mod";
   sprayTabs.forEach((tab) => {
@@ -1364,6 +1442,7 @@ function setSpraySourceTab(source) {
   });
   renderSprayAssets();
 }
+
 
 function focusSprayAsset(slot) {
   const assetId = sprayAssignments[slot];
@@ -1380,17 +1459,20 @@ function focusSprayAsset(slot) {
   }, 0);
 }
 
+
 function updateSpraySummary() {
   const modAssets = sprayAssets.filter((asset) => asset.sourceType !== "imported");
   const importedAssets = sprayAssets.filter((asset) => asset.sourceType === "imported");
   spraySummary.textContent = `共 ${sprayAssets.length} 张素材（Mod ${modAssets.length} 张，导入 ${importedAssets.length} 张）；可配置 16 个标准槽位`;
 }
 
+
 function handleSprayPreviewEvent(event) {
   if (!event.target.matches("img[data-spray-preview]")) return;
   sprayPendingPreviews = Math.max(0, sprayPendingPreviews - 1);
   if (sprayPendingPreviews === 0) setSprayStatus("图片提取完成，请为素材指定目标槽位。", false);
 }
+
 
 async function openSprayManager() {
   if (operationBusy) return;
@@ -1419,6 +1501,7 @@ async function openSprayManager() {
   }
 }
 
+
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
   let binary = "";
@@ -1428,6 +1511,7 @@ function arrayBufferToBase64(buffer) {
   }
   return btoa(binary);
 }
+
 
 async function importSprayImages(files) {
   const selectedFiles = [...files];
@@ -1461,14 +1545,17 @@ async function importSprayImages(files) {
   });
 }
 
+
 function hasDraggedFiles(event) {
   return [...(event.dataTransfer?.types || [])].includes("Files");
 }
+
 
 function setSprayDropActive(active) {
   sprayDropOverlay.classList.toggle("hidden", !active);
   sprayDialog.classList.toggle("spray-drop-active", active);
 }
+
 
 function handleSpraySelection(event) {
   const select = event.target.closest(".spray-asset-slot");
@@ -1486,6 +1573,7 @@ function handleSpraySelection(event) {
   renderSprayAssets();
   setSprayStatus(`已选择 ${Object.keys(sprayAssignments).length} 个喷漆槽位。`);
 }
+
 
 async function deleteImportedSpray(assetId) {
   if (operationBusy) return;
@@ -1511,6 +1599,7 @@ async function deleteImportedSpray(assetId) {
   });
 }
 
+
 function handleSprayListClick(event) {
   const configButton = event.target.closest("button[data-spray-config]");
   if (configButton) {
@@ -1520,6 +1609,7 @@ function handleSprayListClick(event) {
   const button = event.target.closest("button[data-spray-delete]");
   if (button) deleteImportedSpray(button.dataset.sprayDelete).catch((error) => showNotice(`删除喷漆失败：${error.message}`));
 }
+
 
 async function applySprayCollection() {
   const count = Object.keys(sprayAssignments).length;
@@ -1546,6 +1636,7 @@ async function applySprayCollection() {
   });
 }
 
+
 async function resetSprayUsage() {
   if (!window.confirm("确定清除最近一次保存的自定义喷漆配置吗？\n这不会删除或停用任何 VPK 文件。")) return;
   return runExclusiveOperation("正在重置喷漆使用情况，请稍候…", async () => {
@@ -1564,9 +1655,11 @@ async function resetSprayUsage() {
   });
 }
 
+
 notice.addEventListener("click", (event) => {
   if (event.target.closest(".notice-close")) notice.classList.add("hidden");
 });
+
 
 async function postJson(route, payload) {
   const response = await fetch(route, {
@@ -1584,14 +1677,17 @@ async function postJson(route, payload) {
   return result;
 }
 
+
 function modelTargetKey(target) {
   return `${target.side || ""}:${target.id || ""}`;
 }
+
 
 function modelTargetLabel(target) {
   const side = target.side === "survivor" ? "幸存者" : target.side === "weapon" ? "武器" : "感染者";
   return `${side} · ${target.name}`;
 }
+
 
 function refreshModelConflictState() {
   const groups = new Map();
@@ -1607,6 +1703,7 @@ function refreshModelConflictState() {
     }
   }
 
+
   state.mods.forEach((mod) => { mod.modelConflicts = []; });
   for (const group of groups.values()) {
     if (group.mods.length < 2) continue;
@@ -1619,12 +1716,14 @@ function refreshModelConflictState() {
   }
 }
 
+
 function getModelTargets(mod) {
   return [
     ...(mod.characterTargets || []),
     ...(mod.weaponTargets || []).map((target) => ({ ...target, side: "weapon" })),
   ].filter((target) => target.side && target.id);
 }
+
 
 function findEnableConflicts(modsToEnable) {
   const selectedIds = new Set(modsToEnable.map((mod) => mod.id));
@@ -1638,6 +1737,7 @@ function findEnableConflicts(modsToEnable) {
     conflicts.push({ target, first, second, reason });
   };
 
+
   for (const mod of modsToEnable) {
     for (const target of getModelTargets(mod)) {
       for (const other of state.mods) {
@@ -1648,6 +1748,7 @@ function findEnableConflicts(modsToEnable) {
       }
     }
   }
+
 
   for (let index = 0; index < modsToEnable.length; index += 1) {
     for (let next = index + 1; next < modsToEnable.length; next += 1) {
@@ -1663,6 +1764,7 @@ function findEnableConflicts(modsToEnable) {
   return conflicts;
 }
 
+
 function confirmEnableConflicts(modsToEnable) {
   const conflicts = findEnableConflicts(modsToEnable);
   if (!conflicts.length) return true;
@@ -1674,6 +1776,7 @@ function confirmEnableConflicts(modsToEnable) {
     `检测到启用后可能发生模型覆盖：\n${lines.join("\n")}${extra}\n\n后启用的 Mod 可能覆盖前一个 Mod 的模型。仍要继续吗？`
   );
 }
+
 
 async function runBulkAction(action) {
   if (operationBusy) return;
@@ -1700,6 +1803,7 @@ async function runBulkAction(action) {
   });
 }
 
+
 async function getAiConfig() {
   const response = await fetch("/api/ai/config", { cache: "no-store" });
   const result = await response.json();
@@ -1707,12 +1811,14 @@ async function getAiConfig() {
   return result;
 }
 
+
 async function getUpdateConfig() {
   const response = await fetch("/api/update/config", { cache: "no-store" });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
   return result;
 }
+
 
 async function checkForUpdates({ automatic = false } = {}) {
   if (!automatic) {
@@ -1738,11 +1844,13 @@ async function checkForUpdates({ automatic = false } = {}) {
   }
 }
 
+
 async function saveUpdateCheckSetting(enabled) {
   const result = await postJson("/api/update/config", { autoCheck: enabled });
   updateAutoCheck.checked = result.autoCheck;
   updateStatus.textContent = result.autoCheck ? "已开启启动时自动检查" : "已关闭启动时自动检查";
 }
+
 
 async function installUpdate() {
   if (!latestUpdateInfo || !latestUpdateInfo.updateAvailable) {
@@ -1762,6 +1870,7 @@ async function installUpdate() {
   window.setTimeout(() => window.close(), 1200);
 }
 
+
 async function openSettings() {
   settingsPanel.classList.remove("hidden");
   settingsStatus.textContent = "正在读取配置…";
@@ -1771,15 +1880,19 @@ async function openSettings() {
     deepseekKeyInput.value = "";
     settingsStatus.textContent = config.configured ? "API Key 已配置" : "尚未配置 API Key";
     updateAutoCheck.checked = updateConfig.autoCheck !== false;
+    updateSourceSelect.value = updateConfig.updateSource || "github";
+    updateSourceSelect.dataset.currentValue = updateSourceSelect.value;
     updateCurrentVersion.textContent = `v${updateConfig.currentVersion}`;
   } catch (error) {
     settingsStatus.textContent = `读取失败：${error.message}`;
   }
 }
 
+
 function closeSettings() {
   settingsPanel.classList.add("hidden");
 }
+
 
 async function saveAiSettings() {
   try {
@@ -1795,6 +1908,7 @@ async function saveAiSettings() {
   }
 }
 
+
 async function clearAiKey() {
   try {
     await postJson("/api/ai/config", { model: aiModelSelect.value, apiKey: "" });
@@ -1805,12 +1919,14 @@ async function clearAiKey() {
   }
 }
 
+
 async function getAiPrompts() {
   const response = await fetch("/api/ai/prompts", { cache: "no-store" });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
   return result;
 }
+
 
 async function getAiHistory(modId) {
   const response = await fetch(`/api/mod/ai-history?id=${encodeURIComponent(modId)}`, { cache: "no-store" });
@@ -1819,11 +1935,13 @@ async function getAiHistory(modId) {
   return result.history || [];
 }
 
+
 function selectedPrompt() {
   const id = aiPromptSelect.value;
   if (id === "default") return aiPrompts.default;
   return (aiPrompts.custom || []).find((prompt) => prompt.id === id) || null;
 }
+
 
 function renderPromptOptions(selectedId = "default") {
   const options = [aiPrompts.default, ...(aiPrompts.custom || [])].filter(Boolean);
@@ -1835,6 +1953,7 @@ function renderPromptOptions(selectedId = "default") {
   aiPromptInput.value = prompt ? prompt.prompt : "";
   aiDeletePromptButton.disabled = aiPromptSelect.value === "default";
 }
+
 
 function renderAiHistory() {
   if (!aiHistory.length) {
@@ -1856,12 +1975,14 @@ function renderAiHistory() {
   showAiHistoryEntry(aiHistory[0]);
 }
 
+
 function showAiHistoryEntry(entry) {
   aiDialogBody.textContent = entry ? entry.analysis : "";
   aiAnalysisStatus.textContent = entry
     ? `${entry.createdAt || ""} · ${entry.model || "DeepSeek"} · ${entry.promptName || "AI 分析"}`
     : "还没有分析结果";
 }
+
 
 async function openAiWorkspace(mod) {
   activeAiMod = mod;
@@ -1891,12 +2012,14 @@ async function openAiWorkspace(mod) {
   }
 }
 
+
 async function configureDeepSeek() {
   const apiKey = window.prompt("请输入 DeepSeek API Key（只保存在本机）");
   if (apiKey === null || apiKey.trim() === "") return false;
   await postJson("/api/ai/config", { apiKey: apiKey.trim() });
   return true;
 }
+
 
 async function runAiAnalysis() {
   if (!activeAiMod) return;
@@ -1925,6 +2048,7 @@ async function runAiAnalysis() {
   }
 }
 
+
 async function saveCurrentPrompt() {
   const selected = selectedPrompt();
   const defaultName = selected && selected.id !== "default" ? selected.name : "我的 Mod 分析";
@@ -1944,6 +2068,7 @@ async function saveCurrentPrompt() {
   }
 }
 
+
 async function deleteCurrentPrompt() {
   const prompt = selectedPrompt();
   if (!prompt || prompt.id === "default") return;
@@ -1958,6 +2083,7 @@ async function deleteCurrentPrompt() {
   }
 }
 
+
 async function handleCardAction(event) {
   if (operationBusy) return;
   const button = event.currentTarget;
@@ -1967,6 +2093,7 @@ async function handleCardAction(event) {
   }
   return runExclusiveOperation("正在处理 Mod 操作，请稍候…", () => handleCardActionInner(button));
 }
+
 
 async function handleCardActionInner(button) {
   const mod = state.mods.find((item) => item.id === button.dataset.modId);
@@ -2087,6 +2214,7 @@ async function handleCardActionInner(button) {
   }
 }
 
+
 async function loadCatalog(force = false) {
   notice.classList.add("hidden");
   try {
@@ -2107,10 +2235,12 @@ async function loadCatalog(force = false) {
   }
 }
 
+
 async function changeFolder() {
   if (operationBusy) return;
   return runExclusiveOperation("正在更改 Mod 目录，请稍候…", () => changeFolderInner());
 }
+
 
 async function changeFolderInner() {
   try {
@@ -2129,10 +2259,12 @@ async function changeFolderInner() {
   }
 }
 
+
 async function resetFolder() {
   if (operationBusy) return;
   return runExclusiveOperation("正在恢复默认目录，请稍候…", () => resetFolderInner());
 }
+
 
 async function resetFolderInner() {
   try {
@@ -2146,6 +2278,7 @@ async function resetFolderInner() {
     showNotice(`恢复默认目录失败：${error.message}`);
   }
 }
+
 
 async function importArchive(file) {
   if (operationBusy) return;
@@ -2186,6 +2319,7 @@ async function importArchive(file) {
   }
 }
 
+
 function renderWorkshopSelectionState() {
   const selectedCount = workshopSelectedIds.size;
   const loading = !workshopLoading.classList.contains("hidden");
@@ -2194,6 +2328,7 @@ function renderWorkshopSelectionState() {
   workshopSelectAll.indeterminate = selectedCount > 0 && selectedCount < workshopMods.length;
   workshopCopy.disabled = loading || selectedCount === 0;
 }
+
 
 function setWorkshopLoading(loading, message = "正在处理 Workshop Mod，请稍候…") {
   workshopLoadingMessage.textContent = message;
@@ -2205,6 +2340,7 @@ function setWorkshopLoading(loading, message = "正在处理 Workshop Mod，请�
   });
   renderWorkshopSelectionState();
 }
+
 
 function renderWorkshopDialog() {
   workshopSummary.textContent = workshopMods.length
@@ -2224,6 +2360,7 @@ function renderWorkshopDialog() {
   renderWorkshopSelectionState();
   if (window.lucide) lucide.createIcons();
 }
+
 
 async function openWorkshopDialog() {
   if (operationBusy) return;
@@ -2245,6 +2382,7 @@ async function openWorkshopDialog() {
     showNotice(`Workshop 扫描失败：${error.message}`);
   }
 }
+
 
 async function copySelectedWorkshopMods() {
   if (operationBusy) return;
@@ -2280,10 +2418,12 @@ async function copySelectedWorkshopMods() {
   }
 }
 
+
 function refreshCatalog() {
   if (operationBusy) return;
   return runExclusiveOperation("正在刷新目录，请稍候…", () => loadCatalog(true));
 }
+
 
 document.querySelector("#search-input").addEventListener("input", (event) => {
   if (operationBusy) return;
@@ -2355,6 +2495,20 @@ updateAutoCheck.addEventListener("change", () => {
       await saveUpdateCheckSetting(enabled);
     } catch (error) {
       updateAutoCheck.checked = !enabled;
+      updateStatus.textContent = `保存失败：${error.message}`;
+    }
+  });
+});
+updateSourceSelect.addEventListener("change", () => {
+  if (operationBusy) return;
+  const previous = updateSourceSelect.dataset.currentValue || "github";
+  const next = updateSourceSelect.value;
+  runExclusiveOperation("正在保存更新源，请稍候…", async () => {
+    try {
+      await saveUpdateSource(next);
+      updateSourceSelect.dataset.currentValue = next;
+    } catch (error) {
+      updateSourceSelect.value = previous;
       updateStatus.textContent = `保存失败：${error.message}`;
     }
   });
@@ -2534,6 +2688,7 @@ document.addEventListener("keydown", (event) => {
     document.querySelector("#search-input").focus();
   }
 });
+
 
 restoreSidebarState();
 const initialNavOrder = restoreNavOrder();
