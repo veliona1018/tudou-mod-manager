@@ -24,3 +24,9 @@ python desktop_app.py
 ## 排错日志
 
 运行日志位于 `%LOCALAPPDATA%\L4D2ModManager\logs\manager.log`，文件超过 2 MB 后会自动轮换并保留最近 3 份。遇到目录读取或启动问题时，可以将这些日志文件提供给开发者排查。
+
+## 自动同步 Gitee
+
+仓库内的 `.github/workflows/sync-gitee.yml` 会在 GitHub 推送代码或 Tag 时同步分支和标签；发布 GitHub Release 后，还会在 Gitee 创建或更新同名 Release 并同步附件。
+
+启用方法：在 GitHub 仓库的 `Settings -> Secrets and variables -> Actions` 中新建仓库 Secret，名称填写 `GITEE_TOKEN`，值填写具有该仓库读写权限的 Gitee 个人访问令牌。令牌只保存在 GitHub Secrets 中，不要写入代码或工作流文件。
