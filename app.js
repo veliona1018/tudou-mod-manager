@@ -76,6 +76,9 @@ const updateCurrentVersion = document.querySelector("#update-current-version");
 const updateCheckButton = document.querySelector("#update-check-button");
 const updateInstallButton = document.querySelector("#update-install-button");
 const updateStatus = document.querySelector("#update-status");
+const updateProgress = document.querySelector("#update-progress");
+const updateProgressBar = document.querySelector("#update-progress-bar");
+const updateProgressDetail = document.querySelector("#update-progress-detail");
 const importPreviewDialog = document.querySelector("#import-preview-dialog");
 const importPreviewList = document.querySelector("#import-preview-list");
 const importPreviewSummary = document.querySelector("#import-preview-summary");
@@ -1950,13 +1953,78 @@ async function saveUpdateSource(source) {
   updateStatus.textContent = `已切换更新源：${label}`;
 }
 
+function formatUpdateBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderUpdateProgress(progress) {
+  if (!progress) return;
+  const active = Boolean(progress.active);
+  const hasDownload = Number(progress.totalBytes) > 0;
+  const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+  const detail = hasDownload
+    ? `${percent}% · ${formatUpdateBytes(progress.downloadedBytes)} / ${formatUpdateBytes(progress.totalBytes)}`
+    : (progress.message || "正在处理…");
+  updateProgress.classList.toggle("hidden", !active);
+  updateProgressBar.classList.toggle("indeterminate", active && !hasDownload);
+  updateProgressBar.style.width = `${hasDownload ? percent : 100}%`;
+  updateProgressDetail.textContent = detail;
+  if (active) {
+    updateStatus.textContent = progress.message || "正在处理…";
+    operationMessage.textContent = hasDownload ? `${progress.message || "正在下载更新包…"} ${detail}` : detail;
+  }
+  if (!active && progress.phase === "error" && progress.message) updateStatus.textContent = progress.message;
+}
+
+async function fetchUpdateProgress() {
+  try {
+    const response = await fetch(`/api/update/progress?time=${Date.now()}`, { cache: "no-store" });
+    if (!response.ok) return null;
+    const progress = await response.json();
+    renderUpdateProgress(progress);
+    return progress;
+  } catch {
+    return null;
+  }
+}
+
+function startUpdateProgressPolling() {
+  let stopped = false;
+  let timer = null;
+  const tick = async () => {
+    if (stopped) return;
+    await fetchUpdateProgress();
+    if (!stopped) timer = window.setTimeout(tick, 350);
+  };
+  tick();
+  return () => {
+    stopped = true;
+    if (timer !== null) window.clearTimeout(timer);
+  };
+}
+
 async function installUpdate() {
   if (!latestUpdateInfo || !latestUpdateInfo.updateAvailable) {
     await checkForUpdates();
     return;
   }
-  updateStatus.textContent = "正在下载并准备更新，请稍候…";
-  const result = await postJson("/api/update/install", {});
+  updateStatus.textContent = "正在检查最新版本…";
+  const stopProgressPolling = startUpdateProgressPolling();
+  let result;
+  try {
+    result = await postJson("/api/update/install", {});
+  } catch (error) {
+    stopProgressPolling();
+    const progress = await fetchUpdateProgress();
+    updateProgress.classList.add("hidden");
+    updateStatus.textContent = progress?.message || `更新失败：${error.message}`;
+    return;
+  }
+  stopProgressPolling();
+  await fetchUpdateProgress();
+  updateProgress.classList.add("hidden");
   if (!result.restartScheduled) {
     updateStatus.textContent = `当前已是最新版本 v${result.latestVersion || latestUpdateInfo.currentVersion}`;
     updateInstallButton.classList.add("hidden");
@@ -2685,7 +2753,7 @@ updateSourceSelect.addEventListener("change", () => {
   });
 });
 updateCheckButton.addEventListener("click", () => runExclusiveOperation("正在检查更新，请稍候…", () => checkForUpdates()));
-updateInstallButton.addEventListener("click", () => runExclusiveOperation("正在下载更新，请稍候…", installUpdate));
+updateInstallButton.addEventListener("click", () => runExclusiveOperation("正在检查最新版本…", installUpdate));
 document.querySelector("#refresh-button").addEventListener("click", refreshCatalog);
 document.querySelector("#change-folder-button").addEventListener("click", changeFolder);
 document.querySelector("#find-game-folder-button").addEventListener("click", findGameFolder);

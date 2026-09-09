@@ -339,11 +339,15 @@
             <button id="update-check-button" class="outline-button" type="button"><i data-lucide="refresh-cw"></i>检查更新</button>
             <button id="update-install-button" class="primary-button hidden" type="button"><i data-lucide="download"></i>下载并更新</button>
           </div>
+          <div id="update-progress" class="update-progress hidden" aria-live="polite">
+            <div class="update-progress-track"><div id="update-progress-bar" class="update-progress-bar"></div></div>
+            <div id="update-progress-detail" class="update-progress-detail"></div>
+          </div>
           <div id="update-status" class="settings-status" role="status" aria-live="polite"></div>
         </section>
       </div>
     </aside>
     <script src="https://unpkg.com/lucide@latest"></script>
-    <script src="app.js?v=20260903"></script>
+    <script src="app.js?v=20260908"></script>
   </body>
 </html>

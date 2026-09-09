@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -125,6 +126,44 @@ class UpdateError(RuntimeError):
     """Raised when an application update cannot be safely prepared."""
 
 
+def _initial_update_progress() -> dict:
+    return {
+        "active": False,
+        "phase": "idle",
+        "message": "暂无更新任务",
+        "downloadedBytes": 0,
+        "totalBytes": 0,
+        "percent": 0,
+        "latestVersion": None,
+        "error": None,
+    }
+
+
+def _set_update_progress(server: object, **changes: object) -> dict:
+    lock = getattr(server, "update_progress_lock", None)
+    if lock is None:
+        lock = threading.Lock()
+        server.update_progress_lock = lock
+    with lock:
+        state = dict(getattr(server, "update_progress", _initial_update_progress()))
+        state.update(changes)
+        server.update_progress = state
+        return dict(state)
+
+
+def _get_update_progress(server: object) -> dict:
+    lock = getattr(server, "update_progress_lock", None)
+    if lock is None:
+        return dict(getattr(server, "update_progress", _initial_update_progress()))
+    with lock:
+        return dict(getattr(server, "update_progress", _initial_update_progress()))
+
+
+def _report_update_progress(progress_callback: object, **changes: object) -> None:
+    if callable(progress_callback):
+        progress_callback(changes)
+
+
 def _version_key(value: str) -> tuple[int, int, int]:
     match = re.fullmatch(r"v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+].*)?", str(value).strip(), re.IGNORECASE)
     if not match:
@@ -138,7 +177,11 @@ def _version_key(value: str) -> tuple[int, int, int]:
     return major, minor, patch
 
 
-def _select_update_asset(assets: object, allowed_hosts: set[str] | None = None) -> dict:
+def _select_update_asset(
+    assets: object,
+    allowed_hosts: set[str] | None = None,
+    preferred_extension: str | None = None,
+) -> dict:
     if not isinstance(assets, list):
         assets = []
     allowed_hosts = allowed_hosts or {"github.com"}
@@ -150,6 +193,12 @@ def _select_update_asset(assets: object, allowed_hosts: set[str] | None = None) 
         and urlsplit(str(item.get("browser_download_url", ""))).scheme == "https"
         and urlsplit(str(item.get("browser_download_url", ""))).hostname in allowed_hosts
     ]
+    if preferred_extension:
+        preferred_extension = preferred_extension.casefold()
+        preferred = [item for item in candidates if Path(str(item.get("name", ""))).suffix.casefold() == preferred_extension]
+        if not preferred:
+            raise UpdateError(f"最新 Release 没有可用的 {preferred_extension.upper().lstrip('.')} 更新文件")
+        candidates = preferred
     executable_assets = [
         item for item in candidates if Path(str(item.get("name", ""))).suffix.casefold() == ".exe"
     ]
@@ -197,7 +246,7 @@ def save_update_source(source: str) -> None:
     target.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _latest_release(source: str | None = None) -> dict:
+def _latest_release(source: str | None = None, preferred_extension: str | None = None) -> dict:
     source = update_source() if source is None else source
     source_info = UPDATE_SOURCES.get(source)
     if source_info is None:
@@ -228,7 +277,7 @@ def _latest_release(source: str | None = None) -> dict:
         normalized = dict(item)
         normalized.setdefault("browser_download_url", normalized.get("download_url") or normalized.get("url", ""))
         assets.append(normalized)
-    asset = _select_update_asset(assets, source_info["allowedHosts"])
+    asset = _select_update_asset(assets, source_info["allowedHosts"], preferred_extension)
     try:
         version = _version_key(tag)
     except UpdateError:
@@ -330,7 +379,12 @@ def save_navigation_order(order: object) -> None:
     target.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _download_update(release: dict, target: Path) -> Path:
+def _download_update(
+    release: dict,
+    target: Path,
+    progress_callback: object = None,
+    package_kind: str = "executable",
+) -> Path:
     update_dir = settings_path().parent / "updates"
     update_dir.mkdir(parents=True, exist_ok=True)
     suffix = Path(str(release.get("assetName", ""))).suffix.casefold()
@@ -346,8 +400,23 @@ def _download_update(release: dict, target: Path) -> Path:
     )
     digest = hashlib.sha256()
     total = 0
+    expected_total = int(release.get("assetSize", 0) or 0)
+    _report_update_progress(
+        progress_callback,
+        phase="downloading",
+        message="正在下载更新包…",
+        downloadedBytes=0,
+        totalBytes=expected_total,
+        percent=0,
+    )
     try:
         with urllib.request.urlopen(request, timeout=60) as response, package.open("wb") as destination:
+            if not expected_total:
+                try:
+                    expected_total = int(response.headers.get("Content-Length", 0) or 0)
+                except (AttributeError, TypeError, ValueError):
+                    expected_total = 0
+            _report_update_progress(progress_callback, totalBytes=expected_total)
             while True:
                 chunk = response.read(1024 * 1024)
                 if not chunk:
@@ -357,9 +426,24 @@ def _download_update(release: dict, target: Path) -> Path:
                     raise UpdateError("更新包超过 512 MB，已停止下载")
                 digest.update(chunk)
                 destination.write(chunk)
+                percent = min(99, int(total * 100 / expected_total)) if expected_total else 0
+                _report_update_progress(
+                    progress_callback,
+                    downloadedBytes=total,
+                    totalBytes=expected_total,
+                    percent=percent,
+                )
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as error:
         package.unlink(missing_ok=True)
         raise UpdateError(f"下载更新包失败：{error}") from error
+    _report_update_progress(
+        progress_callback,
+        phase="validating",
+        message="正在校验更新包…",
+        downloadedBytes=total,
+        totalBytes=expected_total or total,
+        percent=100,
+    )
     if release.get("assetSize") and total != release["assetSize"]:
         package.unlink(missing_ok=True)
         raise UpdateError("更新包大小校验失败")
@@ -369,12 +453,23 @@ def _download_update(release: dict, target: Path) -> Path:
         raise UpdateError("更新包 SHA-256 校验失败，已取消更新")
     try:
         if suffix == ".zip":
-            _find_update_executable(package, target.name)
+            if package_kind == "source":
+                _find_source_root(package)
+            else:
+                _find_update_executable(package, target.name)
         else:
             _validate_direct_executable(package)
     except UpdateError:
         package.unlink(missing_ok=True)
         raise
+    _report_update_progress(
+        progress_callback,
+        phase="scheduling",
+        message="正在准备重启更新…",
+        downloadedBytes=total,
+        totalBytes=expected_total or total,
+        percent=100,
+    )
     return package
 
 
@@ -412,6 +507,35 @@ def _find_update_executable(archive: Path, target_name: str) -> str:
     return matching[0]
 
 
+def _find_source_root(archive: Path) -> str:
+    """Validate a source update archive and return its project-root entry."""
+    required = {"desktop_app.py", "mod_server.py", "index.html"}
+    try:
+        with zipfile.ZipFile(archive) as package:
+            file_names = set()
+            for member in package.infolist():
+                name = member.filename.replace("\\", "/")
+                parts = Path(name).parts
+                if Path(name).is_absolute() or ".." in parts:
+                    raise UpdateError("更新包包含不安全的文件路径")
+                if member.is_dir():
+                    continue
+                file_names.add(name.strip("/"))
+    except (zipfile.BadZipFile, OSError) as error:
+        raise UpdateError(f"更新包不是有效的 ZIP 文件：{error}") from error
+
+    roots = {""}
+    roots.update(name.split("/", 1)[0] for name in file_names if "/" in name)
+    matches = []
+    for root in roots:
+        prefix = f"{root}/" if root else ""
+        if all(f"{prefix}{name}" in file_names for name in required):
+            matches.append(root)
+    if len(matches) != 1:
+        raise UpdateError("源码更新包中无法确定管理器项目目录")
+    return matches[0]
+
+
 def _write_update_script(script: Path) -> None:
     script.write_text(
         """param(
@@ -425,6 +549,12 @@ $ErrorActionPreference = 'Stop'
 $stage = Join-Path ([IO.Path]::GetTempPath()) ('tudou-update-' + [guid]::NewGuid().ToString('N'))
 $updated = $false
 try {
+  # Do not let PyInstaller mistake the updater for a bundled child process.
+  foreach ($name in @('_PYI_ARCHIVE_FILE', '_PYI_PARENT_PROCESS_LEVEL', '_PYI_APPLICATION_HOME_DIR')) {
+    [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+  }
+  # PyInstaller uses this flag for an application restart via sys.executable.
+  [Environment]::SetEnvironmentVariable('PYINSTALLER_RESET_ENVIRONMENT', '1', 'Process')
   $deadline = (Get-Date).AddSeconds(60)
   while ((Get-Process -Id $WaitPid -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
   if (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue) { throw '管理器进程未能正常退出' }
@@ -456,14 +586,159 @@ try {
     )
 
 
-def schedule_update() -> dict:
+def _write_source_update_script(script: Path) -> None:
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(
+        """param(
+  [Parameter(Mandatory=$true)][int]$WaitPid,
+  [Parameter(Mandatory=$true)][string]$PackagePath,
+  [Parameter(Mandatory=$true)][string]$ProjectRoot,
+  [Parameter(Mandatory=$true)][string]$PythonPath,
+  [Parameter(Mandatory=$true)][string]$LauncherScript,
+  [Parameter(Mandatory=$true)][string]$ScriptPath
+)
+$ErrorActionPreference = 'Stop'
+$stage = Join-Path ([IO.Path]::GetTempPath()) ('tudou-source-update-' + [guid]::NewGuid().ToString('N'))
+$updated = $false
+try {
+  $deadline = (Get-Date).AddSeconds(60)
+  while ((Get-Process -Id $WaitPid -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+  if (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue) { throw '管理器进程未能正常退出' }
+  Expand-Archive -LiteralPath $PackagePath -DestinationPath $stage -Force
+  $sourceRoot = Get-ChildItem -LiteralPath $stage -Directory -Force | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'desktop_app.py') } | Select-Object -First 1
+  if (-not $sourceRoot -and (Test-Path -LiteralPath (Join-Path $stage 'desktop_app.py'))) { $sourceRoot = Get-Item -LiteralPath $stage }
+  if (-not $sourceRoot) { throw '源码更新包中找不到管理器项目目录' }
+  foreach ($item in (Get-ChildItem -LiteralPath $sourceRoot.FullName -Force)) {
+    Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $ProjectRoot $item.Name) -Recurse -Force
+  }
+  $updated = $true
+  Start-Process -FilePath $PythonPath -ArgumentList @($LauncherScript) -WorkingDirectory $ProjectRoot
+} catch {
+  exit 1
+} finally {
+  if ($updated) {
+    Remove-Item -LiteralPath $PackagePath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $ScriptPath -Force -ErrorAction SilentlyContinue
+  }
+}
+""",
+        encoding="utf-8-sig",
+    )
+
+
+def _update_process_environment() -> dict[str, str]:
+    return {
+        **{
+            key: value
+            for key, value in os.environ.items()
+            if key not in {
+                "_PYI_ARCHIVE_FILE",
+                "_PYI_PARENT_PROCESS_LEVEL",
+                "_PYI_APPLICATION_HOME_DIR",
+            }
+        },
+        "PYINSTALLER_RESET_ENVIRONMENT": "1",
+    }
+
+
+def _schedule_source_update(progress_callback: object = None) -> dict:
+    release = _latest_release(update_source(), preferred_extension=".zip")
+    _report_update_progress(
+        progress_callback,
+        latestVersion=release["version"],
+        phase="preparing",
+        message=f"发现 v{release['version']}，正在准备源码更新…",
+    )
+    if release["versionKey"] <= _version_key(APP_VERSION):
+        _report_update_progress(
+            progress_callback,
+            active=False,
+            phase="current",
+            message=f"当前已是最新版本 v{APP_VERSION}",
+            percent=100,
+        )
+        return {"currentVersion": APP_VERSION, "latestVersion": release["version"], "restartScheduled": False}
+
+    project_root = resource_root()
+    package = _download_update(
+        release,
+        project_root / "desktop_app.py",
+        progress_callback,
+        package_kind="source",
+    )
+    script = settings_path().parent / f"source-update-{uuid.uuid4().hex}.ps1"
+    try:
+        _write_source_update_script(script)
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+        if not powershell:
+            raise UpdateError("找不到 PowerShell，无法执行开发模式自动更新")
+        subprocess.Popen(
+            [
+                powershell,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script),
+                "-WaitPid",
+                str(os.getppid()),
+                "-PackagePath",
+                str(package),
+                "-ProjectRoot",
+                str(project_root),
+                "-PythonPath",
+                sys.executable,
+                "-LauncherScript",
+                str(project_root / "desktop_app.py"),
+                "-ScriptPath",
+                str(script),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            env=_update_process_environment(),
+        )
+    except (OSError, UpdateError):
+        script.unlink(missing_ok=True)
+        package.unlink(missing_ok=True)
+        raise
+    _report_update_progress(
+        progress_callback,
+        active=False,
+        phase="scheduled",
+        message=f"已准备 v{release['version']}，程序关闭后将更新源码并重启",
+        percent=100,
+    )
+    return {
+        "currentVersion": APP_VERSION,
+        "latestVersion": release["version"],
+        "restartScheduled": True,
+    }
+
+
+def schedule_update(progress_callback: object = None) -> dict:
+    _report_update_progress(progress_callback, phase="checking", message="正在检查最新版本…")
     if not getattr(sys, "frozen", False) or Path(sys.executable).suffix.casefold() != ".exe":
-        raise UpdateError("开发模式不能自动替换程序，请下载 Release 后手动更新")
+        return _schedule_source_update(progress_callback)
     target = Path(sys.executable).resolve()
     release = _latest_release()
+    _report_update_progress(
+        progress_callback,
+        latestVersion=release["version"],
+        phase="preparing",
+        message=f"发现 v{release['version']}，正在准备下载…",
+    )
     if release["versionKey"] <= _version_key(APP_VERSION):
+        _report_update_progress(
+            progress_callback,
+            active=False,
+            phase="current",
+            message=f"当前已是最新版本 v{APP_VERSION}",
+            percent=100,
+        )
         return {"currentVersion": APP_VERSION, "latestVersion": release["version"], "restartScheduled": False}
-    package = _download_update(release, target)
+    package = _download_update(release, target, progress_callback)
     source_name = target.name
     if package.suffix.casefold() == ".zip":
         source_name = Path(_find_update_executable(package, target.name)).name
@@ -495,11 +770,19 @@ def schedule_update() -> dict:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            env=_update_process_environment(),
         )
     except (OSError, UpdateError):
         script.unlink(missing_ok=True)
         package.unlink(missing_ok=True)
         raise
+    _report_update_progress(
+        progress_callback,
+        active=False,
+        phase="scheduled",
+        message=f"已准备 v{release['version']}，程序即将重启完成更新",
+        percent=100,
+    )
     return {
         "currentVersion": APP_VERSION,
         "latestVersion": release["version"],
@@ -1596,6 +1879,9 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
         if request_path == "/api/update/config":
             self._send_json(200, update_config())
             return
+        if request_path == "/api/update/progress":
+            self._send_json(200, _get_update_progress(self.server))
+            return
         if request_path == "/api/theme/config":
             self._send_json(200, theme_config())
             return
@@ -1800,7 +2086,35 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
                 return
 
             if route == "/api/update/install":
-                self._send_json(200, {"ok": True, **schedule_update()})
+                lock = getattr(self.server, "update_progress_lock", None)
+                if lock is None:
+                    lock = threading.Lock()
+                    self.server.update_progress_lock = lock
+                with lock:
+                    current = getattr(self.server, "update_progress", _initial_update_progress())
+                    if current.get("active"):
+                        self._send_json(409, {"error": "更新任务正在进行中，请稍候"})
+                        return
+                    self.server.update_progress = {
+                        **_initial_update_progress(),
+                        "active": True,
+                        "phase": "checking",
+                        "message": "正在检查最新版本…",
+                    }
+                try:
+                    result = schedule_update(
+                        lambda changes: _set_update_progress(self.server, **changes)
+                    )
+                except Exception as error:
+                    _set_update_progress(
+                        self.server,
+                        active=False,
+                        phase="error",
+                        message=f"更新失败：{error}",
+                        error=str(error),
+                    )
+                    raise
+                self._send_json(200, {"ok": True, **result})
                 return
 
             if route == "/api/game/launch":
@@ -2436,6 +2750,8 @@ def run_server(root: Path, port: int = 8765, static_root: Path | None = None) ->
     server.static_root = (static_root or resource_root()).resolve()
     server.catalog_cache = None
     server.spray_assets_cache = None
+    server.update_progress_lock = threading.Lock()
+    server.update_progress = _initial_update_progress()
     log(f"Mod catalog: http://127.0.0.1:{port}/")
     log(f"Scanning: {root}")
     log(f"日志文件：{log_path()}")
