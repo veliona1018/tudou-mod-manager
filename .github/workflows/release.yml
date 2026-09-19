@@ -1,0 +1,55 @@
+name: Build and publish release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install build dependencies
+        run: python -m pip install Pillow pyinstaller
+
+      - name: Verify source
+        run: python -m unittest discover -v
+
+      - name: Build portable manager
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          $icon = (Resolve-Path "assets/tudou-logo.ico").Path
+          $logo = (Resolve-Path "assets/tudou-logo.png").Path
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name "TudouManager-$env:GITHUB_REF_NAME" --icon $icon --add-data "${icon};assets" --add-data "${logo};assets" --distpath release --workpath build/release-work --specpath build/release-spec desktop_app.py
+
+      - name: Build source update package
+        shell: pwsh
+        run: |
+          $prefix = "tudou-mod-manager-$env:GITHUB_REF_NAME/"
+          git archive --format=zip --prefix=$prefix --output "release/TudouManager-$env:GITHUB_REF_NAME-source.zip" HEAD
+
+      - name: Create or update GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $assets = @("release/TudouManager-$tag.exe", "release/TudouManager-$tag-source.zip")
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $assets --clobber --repo $env:GITHUB_REPOSITORY
+          } else {
+            gh release create $tag $assets --repo $env:GITHUB_REPOSITORY --title "土豆管理器 $tag" --notes "运行日志、诊断导出与 AI 日志分析。"
+          }
