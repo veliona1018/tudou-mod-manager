@@ -32,8 +32,17 @@ jobs:
       - name: Verify game folder tests
         run: python -m unittest -v test_game_folder
 
-      - name: Verify game launch tests
-        run: python -m unittest -v test_game_launch
+      - name: Verify game executable discovery
+        run: python -m unittest -v test_game_launch.GameLaunchTests.test_finds_game_executable_above_addons_directory
+
+      - name: Verify direct game launch fallback
+        run: python -m unittest -v test_game_launch.GameLaunchTests.test_launches_game_from_its_install_directory
+
+      - name: Verify Steam launch preference
+        run: python -m unittest -v test_game_launch.GameLaunchTests.test_prefers_steam_even_when_executable_exists
+
+      - name: Verify Steam launch without executable
+        run: python -m unittest -v test_game_launch.GameLaunchTests.test_falls_back_to_steam_when_executable_is_missing
 
       - name: Verify image and settings tests
         run: python -m unittest -v test_gif_to_vtf test_navigation_settings test_theme_settings
