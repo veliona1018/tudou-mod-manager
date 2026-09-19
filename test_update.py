@@ -217,10 +217,13 @@ class UpdateTests(unittest.TestCase):
             project_root.mkdir()
             package = Path(temporary) / "source.zip"
             package.write_bytes(b"source package")
+            # Keep this fixture comfortably newer than any normal local release.
+            # Otherwise a version bump can make the update-path test silently
+            # exercise the already-current branch instead.
             release = {
-                "version": "0.4",
-                "versionKey": _version_key("0.4"),
-                "assetName": "TudouManager-v0.4-source.zip",
+                "version": "99.0",
+                "versionKey": _version_key("99.0"),
+                "assetName": "TudouManager-v99.0-source.zip",
             }
             with patch.dict("os.environ", {"LOCALAPPDATA": temporary}, clear=False):
                 with patch.object(mod_server.sys, "frozen", False, create=True):

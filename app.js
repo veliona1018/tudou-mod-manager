@@ -65,6 +65,9 @@ const aiSavePromptButton = document.querySelector("#ai-save-prompt-button");
 const aiDeletePromptButton = document.querySelector("#ai-delete-prompt-button");
 const aiAnalysisStatus = document.querySelector("#ai-analysis-status");
 const settingsPanel = document.querySelector("#settings-panel");
+const logsPanel = document.querySelector("#logs-panel");
+const logsNavButton = document.querySelector("#logs-nav");
+const logsCloseButton = document.querySelector("#logs-close");
 const aiModelSelect = document.querySelector("#ai-model-select");
 const deepseekKeyInput = document.querySelector("#deepseek-key-input");
 const settingsStatus = document.querySelector("#settings-status");
@@ -79,6 +82,17 @@ const updateStatus = document.querySelector("#update-status");
 const updateProgress = document.querySelector("#update-progress");
 const updateProgressBar = document.querySelector("#update-progress-bar");
 const updateProgressDetail = document.querySelector("#update-progress-detail");
+const logFilePath = document.querySelector("#log-file-path");
+const logViewButton = document.querySelector("#log-view-button");
+const logAnalyzeButton = document.querySelector("#log-analyze-button");
+const logOpenButton = document.querySelector("#log-open-button");
+const logExportButton = document.querySelector("#log-export-button");
+const logClearButton = document.querySelector("#log-clear-button");
+const logContent = document.querySelector("#log-content");
+const logAiResult = document.querySelector("#log-ai-result");
+const logAiResultMeta = document.querySelector("#log-ai-result-meta");
+const logAiContent = document.querySelector("#log-ai-content");
+const logStatus = document.querySelector("#log-status");
 const importPreviewDialog = document.querySelector("#import-preview-dialog");
 const importPreviewList = document.querySelector("#import-preview-list");
 const importPreviewSummary = document.querySelector("#import-preview-summary");
@@ -172,6 +186,7 @@ function setSidebarCollapsed(collapsed, persist = true) {
 
 function toggleSidebar() {
   closeSettings();
+  closeLogs();
   setSidebarCollapsed(!shell.classList.contains("sidebar-collapsed"));
 }
 
@@ -1953,6 +1968,154 @@ async function saveUpdateSource(source) {
   updateStatus.textContent = `已切换更新源：${label}`;
 }
 
+async function getLogInfo() {
+  const response = await fetch(`/api/logs?time=${Date.now()}`, { cache: "no-store" });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+  return result;
+}
+
+function formatLogBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderLogInfo(info, showContent = false) {
+  logFilePath.textContent = info.path || "未知";
+  logFilePath.title = info.path || "";
+  if (showContent) {
+    logContent.textContent = info.content || "当前没有日志记录。";
+    if (info.truncated) logContent.textContent = `（日志内容较长，仅显示最近 ${formatLogBytes(info.maxBytes)}）\n\n${logContent.textContent}`;
+    logContent.classList.remove("hidden");
+    logContent.scrollTop = logContent.scrollHeight;
+  }
+  const fileCount = Array.isArray(info.files) ? info.files.length : 0;
+  logStatus.textContent = `当前日志 ${formatLogBytes(info.size)}${fileCount > 1 ? `，含 ${fileCount - 1} 个轮转备份` : ""}`;
+}
+
+function clearLogAiResult() {
+  logAiResult.classList.add("hidden");
+  logAiResultMeta.textContent = "";
+  logAiContent.textContent = "";
+}
+
+async function viewLogs() {
+  return runExclusiveOperation("正在读取运行日志，请稍候…", async () => {
+    try {
+      clearLogAiResult();
+      renderLogInfo(await getLogInfo(), true);
+    } catch (error) {
+      logStatus.textContent = `读取日志失败：${error.message}`;
+      logStatus.classList.add("error");
+    }
+  });
+}
+
+async function openLogFolder() {
+  return runExclusiveOperation("正在打开日志目录，请稍候…", async () => {
+    try {
+      const result = await postJson("/api/logs/open", {});
+      logStatus.textContent = `日志目录：${result.path}`;
+      logStatus.classList.remove("error");
+    } catch (error) {
+      logStatus.textContent = `打开日志目录失败：${error.message}`;
+      logStatus.classList.add("error");
+    }
+  });
+}
+
+async function exportLogs() {
+  return runExclusiveOperation("正在导出诊断日志，请稍候…", async () => {
+    try {
+      const response = await fetch(`/api/logs/export?time=${Date.now()}`, { cache: "no-store" });
+      if (!response.ok) {
+        const result = await response.json();
+        throw new Error(result.error || `HTTP ${response.status}`);
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `tudou-manager-diagnostics-${new Date().toISOString().replace(/[:.]/g, "-")}.zip`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      logStatus.textContent = "诊断日志已导出到下载目录";
+      logStatus.classList.remove("error");
+    } catch (error) {
+      logStatus.textContent = `导出诊断日志失败：${error.message}`;
+      logStatus.classList.add("error");
+    }
+  });
+}
+
+async function clearLogs() {
+  if (!window.confirm("确定清理当前日志和轮转备份吗？")) return;
+  return runExclusiveOperation("正在清理运行日志，请稍候…", async () => {
+    try {
+      const result = await postJson("/api/logs/clear", {});
+      logContent.textContent = "";
+      logContent.classList.add("hidden");
+      clearLogAiResult();
+      logStatus.textContent = `已清理 ${result.removed || 0} 个日志文件`;
+      logStatus.classList.remove("error");
+    } catch (error) {
+      logStatus.textContent = `清理日志失败：${error.message}`;
+      logStatus.classList.add("error");
+    }
+  });
+}
+
+async function openLogs() {
+  if (operationBusy) return;
+  closeSettings();
+  logsPanel.classList.remove("hidden");
+  logsNavButton.classList.add("active");
+  logsNavButton.setAttribute("aria-expanded", "true");
+  logContent.textContent = "正在读取当前日志…";
+  logContent.classList.remove("hidden");
+  logStatus.textContent = "正在读取日志…";
+  logStatus.classList.remove("error");
+  clearLogAiResult();
+  try {
+    await runExclusiveOperation("正在读取运行日志，请稍候…", async () => {
+      renderLogInfo(await getLogInfo(), true);
+    });
+  } catch (error) {
+    logStatus.textContent = `读取日志失败：${error.message}`;
+    logStatus.classList.add("error");
+  }
+}
+
+async function analyzeLogs() {
+  return runExclusiveOperation("正在请求 DeepSeek 分析日志，请稍候…", async () => {
+    try {
+      logAnalyzeButton.disabled = true;
+      logStatus.textContent = "正在请求 DeepSeek 分析日志…";
+      const result = await postJson("/api/logs/analyze", {});
+      logAiContent.textContent = result.analysis || "DeepSeek 没有返回分析内容。";
+      logAiResultMeta.textContent = `${result.createdAt || ""} · ${result.model || "DeepSeek"}${result.truncated ? " · 已分析最新部分日志" : ""}`;
+      logAiResult.classList.remove("hidden");
+      logStatus.textContent = "日志分析完成";
+      logStatus.classList.remove("error");
+    } catch (error) {
+      logStatus.textContent = `日志 AI 分析失败：${error.message}`;
+      logStatus.classList.add("error");
+    } finally {
+      logAnalyzeButton.disabled = false;
+    }
+  });
+}
+
+function closeLogs() {
+  logsPanel.classList.add("hidden");
+  logsNavButton.classList.remove("active");
+  logsNavButton.setAttribute("aria-expanded", "false");
+}
+
 function formatUpdateBytes(value) {
   const bytes = Number(value) || 0;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -2038,7 +2201,9 @@ async function installUpdate() {
 
 
 async function openSettings() {
+  closeLogs();
   settingsPanel.classList.remove("hidden");
+  settingsNavButton.classList.add("active");
   settingsNavButton.setAttribute("aria-expanded", "true");
   settingsStatus.textContent = "正在读取配置…";
   try {
@@ -2065,6 +2230,7 @@ async function saveTheme(theme) {
 
 function closeSettings() {
   settingsPanel.classList.add("hidden");
+  settingsNavButton.classList.remove("active");
   settingsNavButton.setAttribute("aria-expanded", "false");
 }
 
@@ -2652,10 +2818,10 @@ document.querySelectorAll(".filter").forEach((button) => button.addEventListener
   state.filter = button.dataset.filter;
   render();
 }));
-document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => {
+document.querySelectorAll(".nav-item[data-category]").forEach((button) => button.addEventListener("click", () => {
   if (operationBusy) return;
   if (button.dataset.navId === "settings") return;
-  document.querySelectorAll(".nav-item").forEach((item) => item.classList.remove("active"));
+  document.querySelectorAll(".nav-item[data-category]").forEach((item) => item.classList.remove("active"));
   button.classList.add("active");
   state.category = button.dataset.category;
   render();
@@ -2666,7 +2832,7 @@ document.querySelectorAll(".role-filter").forEach((button) => button.addEventLis
   button.classList.add("active");
   state.category = "survivor_target";
   state.roleSide = button.dataset.roleSide;
-  document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.category === "survivor_target"));
+  document.querySelectorAll(".nav-item[data-category]").forEach((item) => item.classList.toggle("active", item.dataset.category === "survivor_target"));
   render();
 }));
 document.querySelectorAll(".voice-role-filter").forEach((button) => button.addEventListener("click", () => {
@@ -2675,7 +2841,7 @@ document.querySelectorAll(".voice-role-filter").forEach((button) => button.addEv
   button.classList.add("active");
   state.category = "voice_replacement";
   state.voiceSide = button.dataset.voiceSide;
-  document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.category === "voice_replacement"));
+  document.querySelectorAll(".nav-item[data-category]").forEach((item) => item.classList.toggle("active", item.dataset.category === "voice_replacement"));
   render();
 }));
 document.querySelectorAll("[data-bulk-action]").forEach((button) => button.addEventListener("click", () => {
@@ -2711,6 +2877,12 @@ settingsNavButton.addEventListener("click", () => {
 });
 sidebarToggleButton.addEventListener("click", toggleSidebar);
 document.querySelector("#settings-close").addEventListener("click", closeSettings);
+logsNavButton.addEventListener("click", () => {
+  if (logsPanel.classList.contains("hidden")) openLogs();
+  else closeLogs();
+});
+logsCloseButton.addEventListener("click", closeLogs);
+logAnalyzeButton.addEventListener("click", analyzeLogs);
 themeSelect.addEventListener("change", () => {
   if (operationBusy) return;
   const previous = normalizeTheme(document.documentElement.dataset.theme);
@@ -2754,6 +2926,10 @@ updateSourceSelect.addEventListener("change", () => {
 });
 updateCheckButton.addEventListener("click", () => runExclusiveOperation("正在检查更新，请稍候…", () => checkForUpdates()));
 updateInstallButton.addEventListener("click", () => runExclusiveOperation("正在检查最新版本…", installUpdate));
+logViewButton.addEventListener("click", viewLogs);
+logOpenButton.addEventListener("click", openLogFolder);
+logExportButton.addEventListener("click", exportLogs);
+logClearButton.addEventListener("click", clearLogs);
 document.querySelector("#refresh-button").addEventListener("click", refreshCatalog);
 document.querySelector("#change-folder-button").addEventListener("click", changeFolder);
 document.querySelector("#find-game-folder-button").addEventListener("click", findGameFolder);

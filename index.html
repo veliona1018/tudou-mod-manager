@@ -27,6 +27,9 @@
           <button class="nav-item" data-nav-id="spray" data-category="spray" draggable="true" type="button"><i data-lucide="image"></i>喷漆</button>
           <button id="settings-nav" class="nav-item" data-nav-id="settings" draggable="true" type="button" aria-expanded="false"><i data-lucide="settings-2"></i>设置</button>
         </nav>
+        <div class="nav-secondary">
+          <button id="logs-nav" class="nav-item" type="button" aria-expanded="false"><i data-lucide="file-text"></i>日志</button>
+        </div>
 
 
         <div class="sidebar-footer">
@@ -347,7 +350,36 @@
         </section>
       </div>
     </aside>
+    <aside id="logs-panel" class="settings-panel hidden" aria-label="运行日志">
+      <div class="settings-head">
+        <div>
+          <h2>运行日志</h2>
+        </div>
+        <button id="logs-close" class="icon-button" type="button" title="关闭" aria-label="关闭运行日志"><i data-lucide="x"></i></button>
+      </div>
+      <div class="settings-content">
+        <section class="settings-section" aria-labelledby="log-settings-section-title">
+          <div class="settings-version">日志位置：<strong id="log-file-path">读取中…</strong></div>
+          <div class="settings-actions settings-log-actions">
+            <button id="log-view-button" class="outline-button" type="button"><i data-lucide="refresh-cw"></i>刷新日志</button>
+            <button id="log-analyze-button" class="outline-button" type="button"><i data-lucide="sparkles"></i>AI 分析日志</button>
+            <button id="log-open-button" class="outline-button" type="button"><i data-lucide="folder-open"></i>打开目录</button>
+            <button id="log-export-button" class="outline-button" type="button"><i data-lucide="download"></i>导出诊断</button>
+            <button id="log-clear-button" class="outline-button" type="button"><i data-lucide="trash-2"></i>清理日志</button>
+          </div>
+          <pre id="log-content" class="log-viewer" aria-live="polite">正在读取当前日志…</pre>
+          <section id="log-ai-result" class="log-ai-result hidden" aria-labelledby="log-ai-result-title">
+            <div class="log-ai-result-head">
+              <strong id="log-ai-result-title">AI 分析结果</strong>
+              <span id="log-ai-result-meta"></span>
+            </div>
+            <pre id="log-ai-content" class="log-ai-content"></pre>
+          </section>
+          <div id="log-status" class="settings-status" role="status" aria-live="polite"></div>
+        </section>
+      </div>
+    </aside>
     <script src="https://unpkg.com/lucide@latest"></script>
-    <script src="app.js?v=20260908"></script>
+    <script src="app.js?v=20260913-2"></script>
   </body>
 </html>

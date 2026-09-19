@@ -9,6 +9,7 @@ from pathlib import Path
 
 LOG_MAX_BYTES = 2 * 1024 * 1024
 LOG_BACKUP_COUNT = 3
+LOG_READ_MAX_BYTES = 1024 * 1024
 _LOGGER: logging.Logger | None = None
 
 
@@ -66,6 +67,57 @@ def write_log(
             logger.info(formatted)
     except Exception:
         return
+
+
+def log_files() -> list[Path]:
+    """Return the current log and any existing rotated files."""
+
+    path = log_path()
+    try:
+        return [path, *sorted(path.parent.glob(f"{path.name}.*"))]
+    except OSError:
+        return [path]
+
+
+def read_log(max_bytes: int = LOG_READ_MAX_BYTES) -> dict[str, object]:
+    """Read the newest part of the log without allowing diagnostics to fail startup."""
+
+    path = log_path()
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        raw = b""
+    except OSError as error:
+        raise OSError(f"无法读取日志文件：{error}") from error
+    truncated = len(raw) > max_bytes
+    if truncated:
+        raw = raw[-max_bytes:]
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        size = 0
+    return {
+        "path": str(path),
+        "content": raw.decode("utf-8", errors="replace"),
+        "size": size,
+        "truncated": truncated,
+        "maxBytes": max_bytes,
+    }
+
+
+def clear_logs() -> int:
+    """Remove the current log and its rotated backups, returning the file count."""
+
+    close_logging()
+    removed = 0
+    for path in log_files():
+        try:
+            if path.exists():
+                path.unlink()
+                removed += 1
+        except OSError as error:
+            raise OSError(f"无法清理日志文件：{path.name}：{error}") from error
+    return removed
 
 
 def close_logging() -> None:

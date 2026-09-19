@@ -6,8 +6,10 @@ import argparse
 import ctypes
 from datetime import datetime
 import hashlib
+import io
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -26,7 +28,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from ctypes import wintypes
 
 from app_version import APP_VERSION, GITEE_REPOSITORY, UPDATE_REPOSITORY
-from app_logging import close_logging, log_path, write_log
+from app_logging import clear_logs, close_logging, log_files, log_path, read_log, write_log
 
 from folder_picker import choose_folder
 
@@ -120,6 +122,14 @@ DEFAULT_AI_PROMPT = (
     "4. 不确定的地方。不要把文件名猜测当成确定事实，也不要编造不存在的内容。"
     "如果只有脚本、界面或材质路径，请解释它们可能的用途。"
 )
+DEFAULT_LOG_AI_PROMPT = (
+    "请分析下面这份土豆 Mod 管理器运行日志，用简体中文回答："
+    "1. 是否存在真正的错误或异常；2. 最值得关注的问题；"
+    "3. 可能原因和对应证据；4. 建议用户下一步如何处理。"
+    "请区分 INFO、WARNING 和 ERROR，不要把普通扫描记录或测试临时目录误判为错误。"
+    "只能根据日志内容作答，不要编造日志中没有出现的事实。"
+)
+LOG_AI_MAX_CHARS = 60000
 
 
 class UpdateError(RuntimeError):
@@ -801,6 +811,28 @@ def log(message: str) -> None:
     write_log(message, component="server")
     if sys.stdout is not None:
         print(message)
+
+
+def _diagnostic_archive(static_root: Path, mod_root: Path) -> bytes:
+    """Build a diagnostic archive without including user configuration or API keys."""
+
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in log_files():
+            try:
+                if path.is_file():
+                    archive.write(path, f"logs/{path.name}")
+            except OSError:
+                continue
+        environment = (
+            f"manager_version=v{APP_VERSION}\n"
+            f"python={platform.python_version()}\n"
+            f"platform={platform.platform()}\n"
+            f"mod_root={mod_root}\n"
+            f"resource_root={static_root}\n"
+        )
+        archive.writestr("environment.txt", environment)
+    return output.getvalue()
 
 
 def source_version(root: Path) -> str:
@@ -1620,17 +1652,7 @@ def _ai_context(mod: dict) -> dict:
     }
 
 
-def deepseek_analyze(
-    mod: dict,
-    api_key: str,
-    model: str,
-    instruction: str = DEFAULT_AI_PROMPT,
-) -> str:
-    context = json.dumps(_ai_context(mod), ensure_ascii=False, indent=2)
-    prompt = (
-        f"{instruction.strip()}\n\n"
-        f"Mod 检测数据：\n{context}"
-    )
+def _deepseek_chat(prompt: str, api_key: str, model: str, system_content: str) -> str:
     payload = json.dumps(
         {
             "model": model,
@@ -1638,7 +1660,7 @@ def deepseek_analyze(
             "messages": [
                 {
                     "role": "system",
-                    "content": "你是一个谨慎的 L4D2 Mod 文件分析助手，只根据证据作答。",
+                    "content": system_content,
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -1676,6 +1698,40 @@ def deepseek_analyze(
     if not isinstance(content, str) or not content.strip():
         raise ValueError("DeepSeek 返回了空分析结果")
     return content.strip()
+
+
+def deepseek_analyze(
+    mod: dict,
+    api_key: str,
+    model: str,
+    instruction: str = DEFAULT_AI_PROMPT,
+) -> str:
+    context = json.dumps(_ai_context(mod), ensure_ascii=False, indent=2)
+    prompt = (
+        f"{instruction.strip()}\n\n"
+        f"Mod 检测数据：\n{context}"
+    )
+    return _deepseek_chat(
+        prompt,
+        api_key,
+        model,
+        "你是一个谨慎的 L4D2 Mod 文件分析助手，只根据证据作答。",
+    )
+
+
+def deepseek_analyze_log(
+    log_text: str,
+    api_key: str,
+    model: str,
+    instruction: str = DEFAULT_LOG_AI_PROMPT,
+) -> str:
+    prompt = f"{instruction.strip()}\n\n运行日志：\n{log_text}"
+    return _deepseek_chat(
+        prompt,
+        api_key,
+        model,
+        "你是一个谨慎的桌面应用运行日志分析助手，只根据日志证据作答。",
+    )
 
 
 def _natural_path_key(value: str) -> list[object]:
@@ -1882,6 +1938,35 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
         if request_path == "/api/update/progress":
             self._send_json(200, _get_update_progress(self.server))
             return
+        if request_path == "/api/logs":
+            try:
+                info = read_log()
+                files = []
+                for path in log_files():
+                    try:
+                        if path.is_file():
+                            files.append({"name": path.name, "size": path.stat().st_size})
+                    except OSError:
+                        continue
+                self._send_json(200, {**info, "files": files})
+            except OSError as error:
+                self._send_json(400, {"error": str(error)})
+            return
+        if request_path == "/api/logs/export":
+            try:
+                content = _diagnostic_archive(self.server.static_root, self.mod_root)
+            except OSError as error:
+                self._send_json(400, {"error": f"无法导出诊断日志：{error}"})
+                return
+            filename = f"tudou-manager-diagnostics-{datetime.now():%Y%m%d-%H%M%S}.zip"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+            return
         if request_path == "/api/theme/config":
             self._send_json(200, theme_config())
             return
@@ -2055,6 +2140,56 @@ class ModRequestHandler(SimpleHTTPRequestHandler):
                 message = str(payload.get("message", "未知错误"))[:500]
                 write_log(f"{context}：{message}", component="client", error=True)
                 self._send_json(200, {"ok": True})
+                return
+
+            if route == "/api/logs/analyze":
+                api_key, model = deepseek_config()
+                if not api_key:
+                    self._send_json(400, {"error": "请先在设置中配置 DeepSeek API Key"})
+                    return
+                payload = self._read_json()
+                prompt = str(payload.get("prompt", DEFAULT_LOG_AI_PROMPT)).strip()
+                if not prompt:
+                    raise ValueError("日志分析提示词不能为空")
+                if len(prompt) > 12000:
+                    raise ValueError("日志分析提示词不能超过 12000 个字符")
+                info = read_log(max_bytes=LOG_AI_MAX_CHARS * 2)
+                log_text = str(info.get("content", ""))
+                truncated = bool(info.get("truncated"))
+                if len(log_text) > LOG_AI_MAX_CHARS:
+                    log_text = log_text[-LOG_AI_MAX_CHARS:]
+                    truncated = True
+                if not log_text.strip():
+                    self._send_json(400, {"error": "当前没有可分析的日志记录"})
+                    return
+                analysis = deepseek_analyze_log(log_text, api_key, model, prompt)
+                write_log("已完成运行日志 AI 分析", component="ai")
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "analysis": analysis,
+                        "model": model,
+                        "createdAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+                        "logSize": info.get("size", 0),
+                        "truncated": truncated,
+                    },
+                )
+                return
+
+            if route == "/api/logs/open":
+                folder = log_path().parent
+                folder.mkdir(parents=True, exist_ok=True)
+                opener = getattr(os, "startfile", None)
+                if opener is None:
+                    raise OSError("当前系统不支持在文件管理器中打开日志目录")
+                opener(str(folder))
+                self._send_json(200, {"ok": True, "path": str(folder)})
+                return
+
+            if route == "/api/logs/clear":
+                removed = clear_logs()
+                self._send_json(200, {"ok": True, "removed": removed, "path": str(log_path())})
                 return
 
             if route == "/api/update/config":
