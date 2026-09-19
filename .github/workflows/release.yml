@@ -23,8 +23,23 @@ jobs:
       - name: Install build dependencies
         run: python -m pip install Pillow pyinstaller
 
-      - name: Verify source
-        run: python -m unittest discover -v
+      - name: Verify logging tests
+        run: python -m unittest -v test_app_logging
+
+      - name: Verify desktop launcher tests
+        run: python -m unittest -v test_desktop_app
+
+      - name: Verify game folder and launch tests
+        run: python -m unittest -v test_game_folder test_game_launch
+
+      - name: Verify image and settings tests
+        run: python -m unittest -v test_gif_to_vtf test_navigation_settings test_theme_settings
+
+      - name: Verify update tests
+        run: python -m unittest -v test_update
+
+      - name: Verify VPK and spray tests
+        run: python -m unittest -v test_vpk_detector
 
       - name: Build portable manager
         shell: pwsh
