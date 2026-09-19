@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -27,14 +28,18 @@ class DesktopAppTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows mutex behavior is Windows-specific")
     def test_windows_mutex_rejects_second_instance(self):
-        first = acquire_single_instance()
-        try:
-            second = acquire_single_instance()
-            self.assertIsNotNone(first)
-            self.assertIsNone(second)
-            release_single_instance(second)
-        finally:
-            release_single_instance(first)
+        # The production name can already be held by a running manager or an
+        # unrelated test process. Isolate the behavior test from that state.
+        mutex_name = f"Local\\TudouModManager.Test.{uuid.uuid4().hex}"
+        with patch("desktop_app.SINGLE_INSTANCE_MUTEX", mutex_name):
+            first = acquire_single_instance()
+            try:
+                second = acquire_single_instance()
+                self.assertIsNotNone(first)
+                self.assertIsNone(second)
+                release_single_instance(second)
+            finally:
+                release_single_instance(first)
 
 
 if __name__ == "__main__":
