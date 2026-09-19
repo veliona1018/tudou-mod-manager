@@ -29,8 +29,11 @@ jobs:
       - name: Verify desktop launcher tests
         run: python -m unittest -v test_desktop_app
 
-      - name: Verify game folder and launch tests
-        run: python -m unittest -v test_game_folder test_game_launch
+      - name: Verify game folder tests
+        run: python -m unittest -v test_game_folder
+
+      - name: Verify game launch tests
+        run: python -m unittest -v test_game_launch
 
       - name: Verify image and settings tests
         run: python -m unittest -v test_gif_to_vtf test_navigation_settings test_theme_settings
